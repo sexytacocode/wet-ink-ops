@@ -88,6 +88,30 @@ async function appendArticle(sheets, spreadsheetId, body) {
     return { ok: false, error: 'POSTED: marker not found in column B' };
   }
 
+  // Idempotency: if the title is already in the Article Coverage table,
+  // return a "skipped" success rather than insert a duplicate row. Guards
+  // against Vercel function retries and pipeline reruns.
+  if (body.title && postedRow > 2) {
+    const titleCheckRes = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: `${SHEET_NAME}!B2:B${postedRow - 1}`,
+    });
+    const target = normalizeTitle(body.title);
+    const existing = titleCheckRes.data.values || [];
+    for (let i = 0; i < existing.length; i++) {
+      if (normalizeTitle((existing[i] || [])[0] || '') === target) {
+        return {
+          ok: true,
+          action: 'append',
+          skipped: true,
+          message: 'article already in tracker',
+          existing_row: i + 2,
+          title: body.title,
+        };
+      }
+    }
+  }
+
   // Compute next # by scanning column A from row 2 to postedRow-1
   let maxNum = 0;
   if (postedRow > 2) {

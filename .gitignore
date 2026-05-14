@@ -1,1 +1,12 @@
 .DS_Store
+node_modules/
+.vercel
+*.local
+*.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+# Never commit service-account credentials
+*service-account*.json
+service-account-key.json

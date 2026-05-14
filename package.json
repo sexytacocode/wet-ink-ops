@@ -1,0 +1,9 @@
+{
+  "name": "wet-ink-ops-webhook",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Vercel webhook that writes to the Wet_Ink_IG_Content_Tracker sheet on behalf of the daily content pipeline.",
+  "dependencies": {
+    "googleapis": "^144.0.0"
+  }
+}

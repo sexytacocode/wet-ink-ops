@@ -279,7 +279,7 @@ Spawn the `reel-image-reviewer` subagent:
 Run the reel-image-reviewer agent.
 
 Inputs:
-- expected_asset_id: {uploaded_asset_id}
+- expected_asset_ids: [{uploaded_asset_id}]   # wrap the single uploaded asset_id in a list; reviewer takes a list to support multi-photo articles in the future
 - designs:
     - { id: {uncensored_design_id}, version: "Uncensored" }
     - { id: {sfw_design_id}, version: "SFW" }

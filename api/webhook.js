@@ -24,6 +24,11 @@
  *       Used for one-off cleanup. Be careful — this shifts all rows
  *       below up by one.
  *
+ *   { action: "list_titles" }
+ *     → returns every row in the Article Coverage table as
+ *       { row, num, title, date, in_asana }. Lets the daily pipeline
+ *       diff against the tracker without needing the Drive MCP.
+ *
  * Auth: OAuth user refresh token (reuses the existing wet-ink-analytics
  * Internal OAuth client). No service account — blocked by org policy
  * iam.disableServiceAccountKeyCreation on hollyrandallagency.com. The
@@ -205,6 +210,35 @@ async function appendArticle(sheets, spreadsheetId, body) {
   };
 }
 
+async function listTitles(sheets, spreadsheetId) {
+  const insertRow = await findInsertRow(sheets, spreadsheetId);
+  const lastDataRow = insertRow - 1;
+  if (lastDataRow < 2) {
+    return { ok: true, action: 'list_titles', count: 0, rows: [] };
+  }
+
+  // Pull A2:J<lastDataRow> in one call
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `${SHEET_NAME}!A2:J${lastDataRow}`,
+  });
+  const values = res.data.values || [];
+  const rows = values.map((r, i) => ({
+    row: i + 2, // 1-indexed spreadsheet row
+    num: r[0] || '',
+    title: r[1] || '',
+    date: r[2] || '',
+    in_asana: r[9] || '', // column J
+  })).filter((r) => r.title); // drop rows with empty title (shouldn't normally happen)
+
+  return {
+    ok: true,
+    action: 'list_titles',
+    count: rows.length,
+    rows,
+  };
+}
+
 async function deleteRow(sheets, spreadsheetId, body) {
   const row = Number(body.row);
   if (!row || row < 2) {
@@ -307,6 +341,10 @@ module.exports = async function handler(req, res) {
       }
       case 'delete_row': {
         const result = await deleteRow(sheets, spreadsheetId, body);
+        return res.status(result.ok ? 200 : 400).json(result);
+      }
+      case 'list_titles': {
+        const result = await listTitles(sheets, spreadsheetId);
         return res.status(result.ok ? 200 : 400).json(result);
       }
       default:

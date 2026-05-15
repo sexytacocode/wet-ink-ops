@@ -17,6 +17,11 @@
  *       straightened, trailing punctuation stripped) and sets column J
  *       ("In Asana") to "Y".
  *
+ *   { action: "delete_row", row: <int> }
+ *     → deletes the given spreadsheet row (1-indexed, must be >= 2).
+ *       Used for one-off cleanup. Be careful — this shifts all rows
+ *       below up by one.
+ *
  * Auth: OAuth user refresh token (reuses the existing wet-ink-analytics
  * Internal OAuth client). No service account — blocked by org policy
  * iam.disableServiceAccountKeyCreation on hollyrandallagency.com. The
@@ -126,7 +131,12 @@ async function appendArticle(sheets, spreadsheetId, body) {
   }
   const nextNum = maxNum + 1;
 
-  // Insert a blank row above the POSTED: row
+  // Insert a blank row above the POSTED: row.
+  // inheritFromBefore: true makes the new row inherit cell formatting,
+  // background colors, font, alignment, and data-validation dropdowns
+  // from the article row above it (rather than from the bold POSTED:
+  // summary row below). Conditional formatting auto-extends to the new
+  // row if its range is defined relatively.
   const sheetId = await getSheetId(sheets, spreadsheetId);
   await sheets.spreadsheets.batchUpdate({
     spreadsheetId,
@@ -139,7 +149,7 @@ async function appendArticle(sheets, spreadsheetId, body) {
             startIndex: postedRow - 1, // 0-indexed for the API
             endIndex: postedRow,
           },
-          inheritFromBefore: false,
+          inheritFromBefore: true,
         },
       }],
     },
@@ -172,6 +182,30 @@ async function appendArticle(sheets, spreadsheetId, body) {
     row_number: nextNum,
     title: body.title,
   };
+}
+
+async function deleteRow(sheets, spreadsheetId, body) {
+  const row = Number(body.row);
+  if (!row || row < 2) {
+    return { ok: false, error: 'row must be a number >= 2 (row 1 is the header)' };
+  }
+  const sheetId = await getSheetId(sheets, spreadsheetId);
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: {
+      requests: [{
+        deleteDimension: {
+          range: {
+            sheetId,
+            dimension: 'ROWS',
+            startIndex: row - 1, // 0-indexed for the API
+            endIndex: row,
+          },
+        },
+      }],
+    },
+  });
+  return { ok: true, action: 'delete_row', deleted_row: row };
 }
 
 async function flipInAsana(sheets, spreadsheetId, body) {
@@ -248,6 +282,10 @@ module.exports = async function handler(req, res) {
       }
       case 'flip_in_asana': {
         const result = await flipInAsana(sheets, spreadsheetId, body);
+        return res.status(result.ok ? 200 : 400).json(result);
+      }
+      case 'delete_row': {
+        const result = await deleteRow(sheets, spreadsheetId, body);
         return res.status(result.ok ? 200 : 400).json(result);
       }
       default:

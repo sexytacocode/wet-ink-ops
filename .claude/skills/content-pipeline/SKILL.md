@@ -17,9 +17,8 @@ description: >
 
 ## ⚠️ PRE-FLIGHT CHECKLIST
 
-- [ ] **Google Drive tools loaded** — Reads only. Load via `tool_search`: `search_files`, `read_file_content`. (Do NOT use `create_file` to write back — it would overwrite the multi-table sheet.)
 - [ ] **bash / curl / python3 available** — Used to scrape the all-posts page, parse HTML, and POST to the tracker webhook.
-- [ ] **Tracker webhook reachable** — Sheet writes go to `https://wet-ink-ops.vercel.app/api/webhook` (Vercel-hosted serverless function in this same repo, at `api/webhook.js`). Requires the `WEBHOOK_SECRET` env var. For local testing, pull it from Vercel with `vercel env pull .env.local && export $(grep WEBHOOK_SECRET .env.local | xargs)`. No Chrome MCP, no Apps Script — works headlessly so the daily scheduled task doesn't need a laptop awake.
+- [ ] **Tracker webhook reachable** — Sheet reads AND writes go to `https://wet-ink-ops.vercel.app/api/webhook` (Vercel-hosted serverless function in this same repo, at `api/webhook.js`). Requires the `WEBHOOK_SECRET` env var. For local testing, pull it from Vercel with `vercel env pull .env.local && export $(grep WEBHOOK_SECRET .env.local | xargs)`. The webhook handles all sheet I/O — no Google Drive MCP, no Chrome MCP, no Apps Script. Works headlessly so the daily scheduled routine doesn't need a laptop awake or any Google connector at all.
 - [ ] **Asana MCP loaded** — Used by Phase 1.5 preflight check and Phase 4 task creation. Load via `tool_search` query `"asana"`.
 - [ ] **Subagent: `reel-image-reviewer`** — Defined at `.claude/agents/reel-image-reviewer.md`. Required for the Phase 3 gate. If unavailable (e.g. running in Claude Desktop), see "Desktop fallback" below.
 - [ ] **Skills referenced** — `instagram-reels`, `wet-ink-voice`, `social-post-optimizer`. Do not duplicate their rules in this skill; read them when invoked.
@@ -155,13 +154,18 @@ Dedupe by slug (the page sometimes renders both a tile and a featured-card link 
 
 **Page 1 is sufficient for daily runs** — new articles always appear at the top. Only fetch page 2 if doing initial sheet setup.
 
-### Step 2: Read the tracker sheet
+### Step 2: Read the tracker via webhook
 
-```
-read_file_content(fileId: "1sPQwj2ZSu9A7drg2YuUwQrcwVQ7JQNcbM7qRbQhMhaA")
+```bash
+curl -X POST "https://wet-ink-ops.vercel.app/api/webhook" \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: $WEBHOOK_SECRET" \
+  -d '{"action":"list_titles"}'
 ```
 
-The Article Coverage table is the first markdown table in the response. Extract the `Article Title` column for comparison. Note the highest `#` value — that's where appends start.
+Returns `{ok: true, count: N, rows: [{row, num, title, date, in_asana}, ...]}`. The `rows` array is every Article Coverage entry, top-to-bottom. Use `title` for the diff in Step 3 and `in_asana` later in Phase 1.5.
+
+(The Drive MCP previously did this read, but the webhook now exposes it directly — one fewer connector for the scheduled routine.)
 
 ### Step 3: Compare
 
@@ -235,9 +239,11 @@ The Wet Ink Reels pattern is two tasks per article: `<Article Title> — Long Un
 
 ### Step 5.5b: Check the tracker In Asana column
 
-Re-read the tracker (Google Drive MCP), find the article's row by title in the Article Coverage table, read column J (`In Asana`). Values:
+You already have the tracker rows from Step 2 (`list_titles` response). Find the article's row by title in that array and read its `in_asana` field:
 - `Y` → counts as "tracker says yes"
 - `N`, empty, or `—` → counts as "tracker says no"
+
+If you don't have the Step 2 data still in context (long Phase 2 may have evicted it), re-call `list_titles` via the webhook — same as Step 2.
 
 ### Step 5.5c: Branch the pipeline
 
@@ -497,6 +503,8 @@ When this skill is invoked from a scheduled task (no user present, no laptop req
 - Phase 2-4 proceed automatically for the FIRST new article only, **only if Phase 1.5 says proceed AND Phase 1 webhook write succeeded AND Step 6 found a usable hero image**.
 - Reviewer FAIL halts at Phase 3, saves the FAIL report, does NOT create Asana tasks.
 - Reviewer PASS continues through Phase 4.
-- Final output is a markdown report saved to `/Users/andrewnagle/Claude/Wet Ink Organic Social Posts/content-pipeline-<YYYY-MM-DD>.md` summarizing: new articles found, sheet rows appended, Phase 1.5 outcome, reviewer verdict, Canva/Asana links, captions generated, anything that needs manual attention.
+- Final output is a markdown report. If running locally with access to `/Users/andrewnagle/Claude/Wet Ink Organic Social Posts/`, save it as `content-pipeline-<YYYY-MM-DD>.md` there. If running as a remote CCR routine (no local filesystem access), print the report as the final assistant message instead — it'll show up in the routine's run log at claude.ai/code/routines.
 
-The scheduled task config must have `WEBHOOK_SECRET` set as an env var.
+Report should cover: new articles found, sheet rows appended, Phase 1.5 outcome, reviewer verdict, Canva/Asana links, captions generated, anything that needs manual attention.
+
+The scheduled routine needs `WEBHOOK_SECRET` available. The remote-trigger API doesn't expose env vars, so the secret is currently embedded in the routine's user prompt (visible only to the user's account). If that ever changes (e.g., env var support added), migrate it out of the prompt.

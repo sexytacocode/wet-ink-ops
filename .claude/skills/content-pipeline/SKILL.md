@@ -18,8 +18,9 @@ description: >
 ## ⚠️ PRE-FLIGHT CHECKLIST
 
 - [ ] **Google Drive tools loaded** — Reads only. Load via `tool_search`: `search_files`, `read_file_content`. (Do NOT use `create_file` to write back — it would overwrite the multi-table sheet.)
-- [ ] **web_fetch / bash available** — Used to scrape the all-posts page. The page is ~70KB and will exceed the inline token limit, so the fetched body should be parsed via bash/python from the temp file `web_fetch` saves it to.
-- [ ] **Claude in Chrome MCP available** — Used to write new article rows into the tracker sheet (the only safe write path; see "Sheet writes" below). Load via `tool_search` with query `"claude-in-chrome"`.
+- [ ] **bash / curl / python3 available** — Used to scrape the all-posts page, parse HTML, and POST to the tracker webhook.
+- [ ] **Tracker webhook reachable** — Sheet writes go to `https://wet-ink-ops.vercel.app/api/webhook` (Vercel-hosted serverless function in this same repo, at `api/webhook.js`). Requires the `WEBHOOK_SECRET` env var. For local testing, pull it from Vercel with `vercel env pull .env.local && export $(grep WEBHOOK_SECRET .env.local | xargs)`. No Chrome MCP, no Apps Script — works headlessly so the daily scheduled task doesn't need a laptop awake.
+- [ ] **Asana MCP loaded** — Used by Phase 1.5 preflight check and Phase 4 task creation. Load via `tool_search` query `"asana"`.
 - [ ] **Subagent: `reel-image-reviewer`** — Defined at `.claude/agents/reel-image-reviewer.md`. Required for the Phase 3 gate. If unavailable (e.g. running in Claude Desktop), see "Desktop fallback" below.
 - [ ] **Skills referenced** — `instagram-reels`, `wet-ink-voice`, `social-post-optimizer`. Do not duplicate their rules in this skill; read them when invoked.
 
@@ -40,12 +41,18 @@ Only IDs unique to THIS skill live in the "Required IDs" section below.
 
 ## OVERVIEW
 
-This skill runs in four phases:
+This skill runs in five phases:
 
 **Phase 1 — Detect & log (cheap, ~25-40K tokens)**
-Scrape wetinkmag.com/all-posts, diff against the tracker sheet, append new rows.
+Scrape wetinkmag.com/all-posts, diff against the tracker sheet, append new rows via the webhook.
 
-**Phase 2 — Build (parallel subagents, only if new articles found)**
+**Phase 1.5 — Preflight check (cheap, ~5K tokens)**
+For the most recent new article, check Asana + the tracker's `In Asana` column to see whether the reel was already created via an ad-hoc run. Branches the pipeline:
+- Both negative → proceed to Phase 2 (normal build)
+- Asana has it → skip Phase 2-3, jump to Phase 4 Step 11 (flip flag), done
+- Both positive → exit pipeline, nothing to do
+
+**Phase 2 — Build (parallel subagents, only if Phase 1.5 says proceed)**
 For the FIRST new article, fan out two subagents simultaneously from the same article inputs:
 - **Reel subagent** — invokes `instagram-reels` (which pulls `wet-ink-voice` for on-design copy). Produces Uncensored + SFW designs and returns the uploaded asset_id.
 - **Caption subagent** — invokes `social-post-optimizer` + `wet-ink-voice`. Produces Instagram caption, hashtags, and X/Twitter copy (both Uncensored and SFW).
@@ -54,7 +61,7 @@ For the FIRST new article, fan out two subagents simultaneously from the same ar
 Invoke `reel-image-reviewer` subagent with the two design_ids and the expected asset_id. Reviewer reads each design with a fresh context and verifies every scene's editable fill uses the article hero image, not a template default.
 
 **Phase 4 — Commit (only on reviewer PASS)**
-Create one Asana task per Reel with platform captions embedded in the description, then flip the article's tracker row. On reviewer FAIL, save a structured report and stop — no Asana tasks, no tracker flip.
+Create one Asana task per Reel with platform captions embedded in the description, then flip the article's tracker row via the webhook. On reviewer FAIL, save a structured report and stop — no Asana tasks, no tracker flip.
 
 **Why one article at a time?** Each Reel build still uses ~150K tokens in the subagent context. Processing one article per run keeps total token use predictable and aligns with how Andrew prioritizes the queue manually.
 
@@ -62,31 +69,50 @@ Create one Asana task per Reel with platform captions embedded in the descriptio
 
 ---
 
-## TRACKER SHEET (READ-ONLY VIA DRIVE)
+## TRACKER SHEET
 
 - **Sheet title:** `Wet_Ink_IG_Content_Tracker`
 - **Sheet ID:** `1sPQwj2ZSu9A7drg2YuUwQrcwVQ7JQNcbM7qRbQhMhaA`
 - **View URL:** https://docs.google.com/spreadsheets/d/1sPQwj2ZSu9A7drg2YuUwQrcwVQ7JQNcbM7qRbQhMhaA/edit
+- **Reads** go through the Google Drive MCP (`read_file_content`).
+- **Writes** go through the webhook at `https://wet-ink-ops.vercel.app/api/webhook`. See "Webhook API" below. NEVER write to the sheet via the Drive MCP — `create_file` would overwrite the multi-table structure.
 
-### Sheet structure (DO NOT overwrite)
+### Sheet structure
 
-The sheet contains FOUR stacked tables in one tab:
+The "Article Coverage" tab contains three logical tables (the second is a separate tab in newer versions of the sheet):
 
-1. **Article Coverage table** (the one we read & append to)
-   Columns: `# | Article Title | Published Date | Posted on IG? | Post Type | IG Post Date | IG Link | Create Post? | New Post Type | Order | In Asana`
+1. **Article Coverage table** (rows 1..N) — the one we read & append to.
+   10 columns (A–J): `# | Article Title | Published Date | Posted on IG? | Post Type | IG Post Date | IG Link | Create Post? | New Post Type | In Asana`.
+   *Note:* an older version had an extra `Order` column making it 11 columns. The live sheet has 10.
 
-2. **Posted / Not Posted summary** (rolling counters)
+2. **Instagram Posts performance table** (rows N+1..M) — read-only for this skill; populated by other tooling.
+   Columns: `# | Date Posted | Post Type | Caption | Likes | Comments | Reach | Shares | Saved | Engagement | Link`.
 
-3. **Instagram Posts performance table**
-   Columns: `# | Date Posted | Post Type | Caption | Likes | Comments | Reach | Shares | Saved | Engagement | Link`
+3. **Webflow Articles slug map** — separate tab.
 
-4. **Article slug map** (Title | Slug | Published Date)
-
-**Critical:** A CSV-overwrite via `create_file` would destroy tables 2-4 and the formatting. NEVER write to this sheet via the Drive MCP. Only write via Chrome MCP (typing into the live spreadsheet) so the existing structure stays intact.
+The webhook locates the end of the Article Coverage table by detecting the Instagram Posts header (column B = "Date Posted") and inserts new rows right above it, regardless of whether there are blank separator rows or POSTED:/NOT POSTED: summary rows in between.
 
 ### If the sheet doesn't exist (rare)
 
 If `search_files` with `title contains 'Wet_Ink_IG_Content_Tracker'` returns nothing, stop and ask the user — don't auto-create. The sheet has bespoke structure that shouldn't be regenerated from scratch.
+
+---
+
+## WEBHOOK API
+
+The Vercel-hosted webhook (`api/webhook.js` in this repo) handles all sheet writes. It auths via OAuth refresh token tied to `andrew@hollyrandallagency.com` (same Internal OAuth client as the GA4/Search Console/YouTube MCPs — see memory note `google_analytics_mcp_auth.md`). Requests require an `X-Webhook-Secret` header.
+
+**Base URL:** `https://wet-ink-ops.vercel.app/api/webhook`
+**Auth:** `X-Webhook-Secret: $WEBHOOK_SECRET` (pull from Vercel with `vercel env pull .env.local`).
+
+| Action | Body | Returns |
+|---|---|---|
+| `ping` | `{"action":"ping"}` | `{ok:true, message:"pong"}` |
+| `append` | `{"action":"append", "title":"...", "date":"Month DD, YYYY"}` | `{ok:true, inserted_at_row, row_number, title}` — or `{ok:true, skipped:true, existing_row}` if the title is already in the tracker (idempotent) |
+| `flip_in_asana` | `{"action":"flip_in_asana", "title":"..."}` | `{ok:true, row, title}` — sets column J to `Y` for the matching article row |
+| `delete_row` | `{"action":"delete_row", "row":N}` | `{ok:true, deleted_row:N}` — one-off cleanup; shifts all rows below up by 1 |
+
+The `append` action auto-computes `#` (max existing + 1), fills the 10 default columns (`Posted on IG?`=N, `Create Post?`=Y, `New Post Type`=Reel, `In Asana`=N), and inherits formatting from the article row above (cell colors, dropdowns, conditional formatting).
 
 ---
 
@@ -148,38 +174,26 @@ An article from the site is "new" if its title does not appear in the sheet's Ar
 - Normalize curly quotes (`’` → `'`, `“` → `"`)
 - If a site title is a close-but-not-exact match (likely a Webflow edit), flag for the user instead of treating as new
 
-### Step 4: Append new rows via Chrome MCP
+### Step 4: Append new rows via the webhook
 
-For each new article, append a row to the bottom of the Article Coverage table. The next-row number is the highest existing `#` + 1.
+For each new article, POST to the tracker webhook:
 
-**Default column values for new rows:**
+```bash
+curl -X POST "https://wet-ink-ops.vercel.app/api/webhook" \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: $WEBHOOK_SECRET" \
+  -d '{
+    "action": "append",
+    "title": "<article title verbatim from scrape>",
+    "date":  "<Published Date, e.g. \"May 12, 2026\">"
+  }'
+```
 
-| Column | Value |
-|---|---|
-| `#` | next sequential number |
-| `Article Title` | from web scrape |
-| `Published Date` | from web scrape (e.g., "May 6, 2026") |
-| `Posted on IG?` | `N` |
-| `Post Type` | (blank) |
-| `IG Post Date` | (blank) |
-| `IG Link` | (blank) |
-| `Create Post?` | `Y` |
-| `New Post Type` | `Reel` |
-| `Order` | (blank — Andrew sets the queue order manually) |
-| `In Asana` | `N` (will flip to `Y` after Phase 4 PASS) |
+The webhook handles everything: auto-computes the next `#`, fills the 10 default columns, and inherits formatting from the article row above. See "Webhook API" above for the full contract.
 
-**Chrome MCP write procedure:**
+**Idempotency:** The webhook is idempotent on `title`. A duplicate POST returns `{ok:true, skipped:true, existing_row:N}` rather than inserting a duplicate. This guards against retries (Vercel function retries on cold start) and pipeline reruns.
 
-1. `tabs_context_mcp` (creates the tab group if needed) → `tabs_create_mcp` for a new tab
-2. `navigate` to `https://docs.google.com/spreadsheets/d/1sPQwj2ZSu9A7drg2YuUwQrcwVQ7JQNcbM7qRbQhMhaA/edit`
-3. Wait for page load (`computer.action: "wait"` ~3s)
-4. Use `javascript_tool` to find the cell coordinates of the next empty row in the Article Coverage table. The table starts at row 2 (row 1 is the header) and ends at the row before the "POSTED:" summary cell. Locate the last filled `#` value, then target the next row.
-5. Click into the cell at column A of the next empty row.
-6. Type values tab-separated using `key: "Tab"` between cells.
-   - Sequence per row: `<#>`, Tab, `<title>`, Tab, `<date>`, Tab, `N`, Tab, Tab, Tab, Tab, `Y`, Tab, `Reel`, Tab, Tab, `N`, Enter
-7. After all new rows are typed, take a screenshot to confirm the rows landed in the correct table (and not in one of the other tables below).
-
-**Fallback if Chrome MCP fails:** If the extension isn't connected or sheet writes error, save the proposed rows to `/Users/andrewnagle/Claude/Wet Ink Organic Social Posts/content-pipeline-<YYYY-MM-DD>.md` and tell the user to paste manually. Do NOT attempt a Drive overwrite.
+**On error:** If the webhook returns a 4xx/5xx, save the proposed rows to `/Users/andrewnagle/Claude/Wet Ink Organic Social Posts/content-pipeline-<YYYY-MM-DD>.md` and stop the pipeline. Do NOT attempt a Drive overwrite.
 
 ### Step 5: Report findings
 
@@ -187,9 +201,54 @@ Tell the user:
 - Total articles parsed from page 1 of all-posts
 - Count already in tracker
 - Count new (with titles, dates, categories, URLs)
-- Whether Phase 2 will proceed (yes if at least one new article)
+- Whether Phase 1.5 will proceed (yes if at least one new article)
 
-If no new articles: "All articles are tracked. Nothing new to process."
+If no new articles: "All articles are tracked. Nothing new to process." Exit the pipeline.
+
+---
+
+## PHASE 1.5: PREFLIGHT CHECK
+
+This phase prevents the pipeline from re-doing work that was already done via an ad-hoc run of the `instagram-reels` skill (or another route). It runs against the **FIRST new article** — the one Phase 2-4 would process.
+
+### Step 5.5a: Search Asana
+
+Load Asana MCP via `tool_search` query `"asana search tasks"`, then search the Wet Ink Social Media project for any task whose name contains the article title:
+
+```
+mcp__asana__search_tasks_preview:
+  workspace: "<wet ink workspace gid>"
+  projects.any: "1214264767251100"   # Wet Ink Social Media project
+  text: "<article title>"
+```
+
+(The Wet Ink Social Media project ID and other operational IDs live in `instagram-reels` SKILL.md "Required Asana IDs" section — do not restate them here.)
+
+Match logic: a task is a hit if its name, after the same normalization the webhook uses, contains the article title. Normalization:
+- lowercase, trim
+- `‘’` → `'`, `“”` → `"`
+- `—–` → `-`
+- strip trailing `?!.,`
+- collapse whitespace
+
+The Wet Ink Reels pattern is two tasks per article: `<Article Title> — Long Uncensored Reel` and `<Article Title> — Long SFW Reel`. Either matching counts as "Asana has it."
+
+### Step 5.5b: Check the tracker In Asana column
+
+Re-read the tracker (Google Drive MCP), find the article's row by title in the Article Coverage table, read column J (`In Asana`). Values:
+- `Y` → counts as "tracker says yes"
+- `N`, empty, or `—` → counts as "tracker says no"
+
+### Step 5.5c: Branch the pipeline
+
+| Asana check | Tracker `In Asana` | Action |
+|---|---|---|
+| no match | `N` / empty | **Proceed to Phase 2** (normal build) |
+| match found | `N` / empty | Asana has it, tracker is stale. **Skip Phase 2-3.** Jump to Phase 4 Step 11 (flip flag to `Y`), then exit. Include the existing Asana task URL in the final report. |
+| no match | `Y` | Tracker says yes but Asana doesn't. Log a warning, **proceed to Phase 2** anyway — the tracker is wrong, fix it by building. |
+| match found | `Y` | Already-processed. **Exit the pipeline** with no further action. Include the Asana task URL in the final report. |
+
+The decision and reasoning must appear in the Phase 4 final report so it's clear why Phase 2-4 ran or didn't.
 
 ---
 
@@ -328,17 +387,32 @@ Suggested X/Twitter copy ({Uncensored | SFW}):
 {twitter_uncensored or twitter_sfw}
 ```
 
-### Step 11: Update tracker via Chrome MCP
+### Step 11: Flip `In Asana` via the webhook
 
-Find the article's row in the Article Coverage table by title (use the same matching rules as Phase 1 Step 3). Flip `In Asana` from `N` to `Y`. No other columns change at this stage.
+POST to the tracker webhook to set column J (`In Asana`) to `Y` for the article's row:
+
+```bash
+curl -X POST "https://wet-ink-ops.vercel.app/api/webhook" \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Secret: $WEBHOOK_SECRET" \
+  -d '{
+    "action": "flip_in_asana",
+    "title": "<article title>"
+  }'
+```
+
+The webhook normalizes the title the same way the `append` action does, so a curly-quote drift between scrape and tracker won't cause a miss. On success it returns `{ok:true, row:N, title}`.
+
+If the webhook returns an error (title not found in tracker), log it but don't block — the Asana tasks have been created at this point, so the failure is recoverable (a human can flip the flag manually). Include the error in the Phase 4 final report.
 
 ### Step 12: Final report
 
 Tell the user / log to the scheduled-run report:
 
 - Article processed (title, category, URL)
-- Reviewer verdict: PASS
-- Both Canva edit URLs (Uncensored + SFW)
+- Phase 1.5 preflight outcome (built fresh / skipped-built / skipped-done)
+- Reviewer verdict: PASS (or skipped if Phase 1.5 routed us around it)
+- Both Canva edit URLs (Uncensored + SFW) — newly created OR pre-existing from Asana
 - Both Asana task URLs
 - IG caption preview (first 100 chars)
 - Number of new articles remaining unprocessed
@@ -352,7 +426,7 @@ If this skill is invoked in an environment without subagent support (Claude Desk
 
 1. Run the `instagram-reels` skill inline. Capture design IDs and `uploaded_asset_id`.
 2. Run `social-post-optimizer` + `wet-ink-voice` inline to draft captions.
-3. **Skip the formal reviewer subagent.** Instead, after both designs are committed, explicitly re-load each design's pages via `Canva:get-design-pages` and manually compare each scene's editable fill `asset_id` against `uploaded_asset_id`. If any scene shows a different asset, stop and report — do not create Asana tasks.
+3. **Skip the formal reviewer subagent.** Instead, after both designs are committed, run the reviewer's checks inline: open each design with `Canva:start-editing-transaction` (then `cancel-editing-transaction` to stay read-only), find each page's `editable: true` image fill, confirm its `asset_id` is in the article's `uploaded_asset_ids` list, and verify the template fingerprint (5 pages of 1080×1920 + decorative asset `MADWDzB46Dw` on every page). See `.claude/agents/reel-image-reviewer.md` for the full rules. If any scene fails, stop and report — do not create Asana tasks.
 4. Proceed to Phase 4 only if the manual check passes.
 
 The Desktop path is less reliable than the subagent gate because the same context that built the designs is checking them. Prefer running this skill through Claude Code / cloud routine when possible.
@@ -381,7 +455,7 @@ All Canva template/folder/brand-kit IDs and all Asana project/section/assignee/c
 
 **Webflow title edits:** If a site title is similar but not identical to a tracked title, do NOT auto-add as new. Flag the diff to the user and let them confirm.
 
-**Sheet write fails (Phase 1):** If Chrome MCP can't append new rows, save the proposed rows to the backup file and tell the user. Phase 2-4 should still run for the most recent new article — losing the sheet write shouldn't block reel creation.
+**Sheet write fails (Phase 1):** If the webhook returns an error (e.g., Vercel deploy is down, refresh token revoked), save the proposed rows to the backup file and stop the pipeline. Do NOT proceed to Phase 2-4 without a confirmed tracker write — that's how duplicate work happens.
 
 **Multiple new articles in one run:** Process only the FIRST (most recent) new article in Phases 2-4. All new articles get added to the tracker in Phase 1. Tell the user how many Phase 2+ candidates remain.
 
@@ -416,10 +490,13 @@ Total: roughly 230-275K tokens per article processed, comparable to the old sing
 
 ## SCHEDULED-RUN BEHAVIOR
 
-When this skill is invoked from a scheduled task (no user present):
+When this skill is invoked from a scheduled task (no user present, no laptop required):
 
-- Phase 1 runs to completion: scrape, read tracker, append new rows via Chrome MCP, save backup file.
-- Phase 2-4 proceed automatically for the FIRST new article only. Skip Phase 2-4 entirely if Chrome MCP isn't connected (no autonomous Canva work without a confirmed tracker write path) or if no hero image was found at Step 6.
+- Phase 1 runs to completion: scrape, read tracker, POST new article rows to the webhook.
+- Phase 1.5 preflight runs against the first new article. If it says "already in Asana," skip ahead to Phase 4 Step 11 (flip flag) and exit. If "already done end to end," exit immediately.
+- Phase 2-4 proceed automatically for the FIRST new article only, **only if Phase 1.5 says proceed AND Phase 1 webhook write succeeded AND Step 6 found a usable hero image**.
 - Reviewer FAIL halts at Phase 3, saves the FAIL report, does NOT create Asana tasks.
 - Reviewer PASS continues through Phase 4.
-- Final output is a markdown report saved to `/Users/andrewnagle/Claude/Wet Ink Organic Social Posts/content-pipeline-<YYYY-MM-DD>.md` summarizing: new articles found, sheet rows appended, reviewer verdict, Canva/Asana links, captions generated, anything that needs manual attention.
+- Final output is a markdown report saved to `/Users/andrewnagle/Claude/Wet Ink Organic Social Posts/content-pipeline-<YYYY-MM-DD>.md` summarizing: new articles found, sheet rows appended, Phase 1.5 outcome, reviewer verdict, Canva/Asana links, captions generated, anything that needs manual attention.
+
+The scheduled task config must have `WEBHOOK_SECRET` set as an env var.

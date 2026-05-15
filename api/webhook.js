@@ -9,8 +9,10 @@
  *     → { ok: true, message: "pong" }
  *
  *   { action: "append", title: "<title>", date: "<Month DD, YYYY>" }
- *     → inserts a new row above the "POSTED:" summary row, auto-computes
- *       the next # value, fills all 10 default columns.
+ *     → inserts a new row at the end of the Article Coverage table
+ *       (just above the Instagram Posts table header), auto-computes
+ *       the next # from the highest existing value, fills the 10
+ *       default columns. Idempotent — duplicate title is skipped.
  *
  *   { action: "flip_in_asana", title: "<title>" }
  *     → finds the row by title (normalized: lowercased, curly quotes
@@ -42,7 +44,7 @@
 const { google } = require('googleapis');
 
 const SHEET_NAME = 'Article Coverage';
-const POSTED_MARKER = 'POSTED:';
+const IG_POSTS_HEADER_MARKER = 'date posted'; // column B value in the Instagram Posts table header row
 
 function getSheetsClient() {
   const oauth2Client = new google.auth.OAuth2(
@@ -65,17 +67,39 @@ async function getSheetId(sheets, spreadsheetId) {
   return tab.properties.sheetId;
 }
 
-async function findPostedRow(sheets, spreadsheetId) {
+/**
+ * Find the spreadsheet row where a new article should be inserted.
+ *
+ * The Article Coverage table is the FIRST table in the sheet (rows 2..N).
+ * The Instagram Posts table sits below it with header row containing
+ * "Date Posted" in column B. We scan column B from row 2 down, tracking
+ * the last non-empty row, and stop when we hit the IG Posts header. The
+ * new article goes right after the last article row.
+ *
+ * Earlier versions of this function looked for a "POSTED:" summary row
+ * marker that sat below the article rows. That row was removed when the
+ * sheet was re-sorted by published date, so we no longer depend on it.
+ *
+ * Returns: 1-indexed spreadsheet row where the new article should land
+ * (insert will shift everything at that row and below down by 1).
+ */
+async function findInsertRow(sheets, spreadsheetId) {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId,
     range: `${SHEET_NAME}!B:B`,
   });
   const values = res.data.values || [];
-  for (let i = 0; i < values.length; i++) {
-    const cell = String((values[i] || [])[0] || '').trim().toUpperCase();
-    if (cell.startsWith(POSTED_MARKER)) return i + 1; // 1-indexed
+
+  let lastArticleRow = 1; // row 1 is the header
+  for (let i = 1; i < values.length; i++) {
+    const cell = String((values[i] || [])[0] || '').trim();
+    // Stop scanning once we hit the Instagram Posts table header
+    if (cell.toLowerCase() === IG_POSTS_HEADER_MARKER) break;
+    // Track the last non-empty row in the Article Coverage table
+    if (cell) lastArticleRow = i + 1; // convert to 1-indexed
   }
-  return -1;
+
+  return lastArticleRow + 1;
 }
 
 function normalizeTitle(s) {
@@ -88,18 +112,15 @@ function normalizeTitle(s) {
 }
 
 async function appendArticle(sheets, spreadsheetId, body) {
-  const postedRow = await findPostedRow(sheets, spreadsheetId);
-  if (postedRow === -1) {
-    return { ok: false, error: 'POSTED: marker not found in column B' };
-  }
+  const insertRow = await findInsertRow(sheets, spreadsheetId);
 
   // Idempotency: if the title is already in the Article Coverage table,
   // return a "skipped" success rather than insert a duplicate row. Guards
   // against Vercel function retries and pipeline reruns.
-  if (body.title && postedRow > 2) {
+  if (body.title && insertRow > 2) {
     const titleCheckRes = await sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: `${SHEET_NAME}!B2:B${postedRow - 1}`,
+      range: `${SHEET_NAME}!B2:B${insertRow - 1}`,
     });
     const target = normalizeTitle(body.title);
     const existing = titleCheckRes.data.values || [];
@@ -117,12 +138,12 @@ async function appendArticle(sheets, spreadsheetId, body) {
     }
   }
 
-  // Compute next # by scanning column A from row 2 to postedRow-1
+  // Compute next # by scanning column A from row 2 to insertRow-1
   let maxNum = 0;
-  if (postedRow > 2) {
+  if (insertRow > 2) {
     const aRes = await sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: `${SHEET_NAME}!A2:A${postedRow - 1}`,
+      range: `${SHEET_NAME}!A2:A${insertRow - 1}`,
     });
     for (const row of aRes.data.values || []) {
       const n = Number(row[0]);
@@ -131,12 +152,12 @@ async function appendArticle(sheets, spreadsheetId, body) {
   }
   const nextNum = maxNum + 1;
 
-  // Insert a blank row above the POSTED: row.
-  // inheritFromBefore: true makes the new row inherit cell formatting,
-  // background colors, font, alignment, and data-validation dropdowns
-  // from the article row above it (rather than from the bold POSTED:
-  // summary row below). Conditional formatting auto-extends to the new
-  // row if its range is defined relatively.
+  // Insert a blank row at insertRow (right after the last article row,
+  // before the Instagram Posts table). inheritFromBefore: true makes the
+  // new row inherit cell formatting, background colors, font, alignment,
+  // and data-validation dropdowns from the article row above it.
+  // Conditional formatting auto-extends to the new row if its range is
+  // defined relatively.
   const sheetId = await getSheetId(sheets, spreadsheetId);
   await sheets.spreadsheets.batchUpdate({
     spreadsheetId,
@@ -146,8 +167,8 @@ async function appendArticle(sheets, spreadsheetId, body) {
           range: {
             sheetId,
             dimension: 'ROWS',
-            startIndex: postedRow - 1, // 0-indexed for the API
-            endIndex: postedRow,
+            startIndex: insertRow - 1, // 0-indexed for the API
+            endIndex: insertRow,
           },
           inheritFromBefore: true,
         },
@@ -170,7 +191,7 @@ async function appendArticle(sheets, spreadsheetId, body) {
   ];
   await sheets.spreadsheets.values.update({
     spreadsheetId,
-    range: `${SHEET_NAME}!A${postedRow}:J${postedRow}`,
+    range: `${SHEET_NAME}!A${insertRow}:J${insertRow}`,
     valueInputOption: 'USER_ENTERED',
     requestBody: { values: [rowValues] },
   });
@@ -178,7 +199,7 @@ async function appendArticle(sheets, spreadsheetId, body) {
   return {
     ok: true,
     action: 'append',
-    inserted_at_row: postedRow,
+    inserted_at_row: insertRow,
     row_number: nextNum,
     title: body.title,
   };
@@ -209,10 +230,10 @@ async function deleteRow(sheets, spreadsheetId, body) {
 }
 
 async function flipInAsana(sheets, spreadsheetId, body) {
-  const postedRow = await findPostedRow(sheets, spreadsheetId);
-  const lastDataRow = postedRow === -1 ? 1000 : postedRow - 1;
+  const insertRow = await findInsertRow(sheets, spreadsheetId);
+  const lastDataRow = insertRow - 1;
   if (lastDataRow < 2) {
-    return { ok: false, error: 'no data rows found' };
+    return { ok: false, error: 'no article rows found in tracker' };
   }
 
   const bRes = await sheets.spreadsheets.values.get({

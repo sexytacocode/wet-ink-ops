@@ -46,13 +46,14 @@ This skill runs in five phases:
 Scrape wetinkmag.com/all-posts, diff against the tracker sheet, append new rows via the webhook.
 
 **Phase 1.5 — Preflight check (cheap, ~5K tokens)**
-For the most recent new article, check Asana + the tracker's `In Asana` column to see whether the reel was already created via an ad-hoc run. Branches the pipeline:
-- Both negative → proceed to Phase 2 (normal build)
-- Asana has it → skip Phase 2-3, jump to Phase 4 Step 11 (flip flag), done
-- Both positive → exit pipeline, nothing to do
+Pick the **target article** for this run — defined as the tracker row with the most recent `Published Date` where `In Asana` is `N`, blank, or `—`. (Today's newly-scraped articles naturally fall into this set because `append` writes `In Asana=N`; backlog articles from prior runs that never built do too.) Then check Asana + the tracker's `In Asana` column to see whether the reel was already created via an ad-hoc run. Branches the pipeline:
+- No target article found (everything is `In Asana=Y`) → exit pipeline
+- Target found, both checks negative → proceed to Phase 2 (normal build)
+- Target found, Asana already has it → skip Phase 2-3, jump to Phase 4 Step 11 (flip flag), done
+- Target found, both positive → exit pipeline, nothing to do
 
 **Phase 2 — Build (parallel subagents, only if Phase 1.5 says proceed)**
-For the FIRST new article, fan out two subagents simultaneously from the same article inputs:
+For the target article from Phase 1.5, fan out two subagents simultaneously from the same article inputs:
 - **Reel subagent** — invokes `instagram-reels` (which pulls `wet-ink-voice` for on-design copy). Produces Uncensored + SFW designs and returns the uploaded asset_id.
 - **Caption subagent** — invokes `social-post-optimizer` + `wet-ink-voice`. Produces Instagram caption, hashtags, and X/Twitter copy (both Uncensored and SFW).
 
@@ -202,18 +203,34 @@ The webhook handles everything: auto-computes the next `#`, fills the 10 default
 ### Step 5: Report findings
 
 Tell the user:
-- Total articles parsed from page 1 of all-posts
+- Total articles parsed from page 1 of all-posts (or from the Webflow CMS fallback)
 - Count already in tracker
-- Count new (with titles, dates, categories, URLs)
-- Whether Phase 1.5 will proceed (yes if at least one new article)
+- Count newly appended this run (with titles, dates, categories, URLs)
+- Count of "backlog" rows (already in tracker but `In Asana = N`)
+- Whether Phase 1.5 will proceed (yes if newly-appended count + backlog count > 0)
 
-If no new articles: "All articles are tracked. Nothing new to process." Exit the pipeline.
+If newly-appended count + backlog count == 0: "All tracker rows are in Asana. Nothing to process." Exit the pipeline.
 
 ---
 
 ## PHASE 1.5: PREFLIGHT CHECK
 
-This phase prevents the pipeline from re-doing work that was already done via an ad-hoc run of the `instagram-reels` skill (or another route). It runs against the **FIRST new article** — the one Phase 2-4 would process.
+This phase has two jobs:
+1. **Pick the target article** — the tracker row this run will process in Phase 2-4.
+2. **Decide whether to build it** — checking Asana + tracker against ad-hoc runs that already produced a Reel.
+
+### Step 5.5 (pre-select): Identify the target article
+
+From the `list_titles` response in Phase 1 Step 2 (still in context), filter to rows where `in_asana` is `"N"`, blank, `"—"`, or anything other than `"Y"`. Sort that filtered set by `Published Date` descending — newest first. The first row is the **target article**.
+
+This rule naturally:
+- Picks up freshly-scraped articles immediately (they were appended with `In Asana=N` in Phase 1 Step 4)
+- Catches up "backlog" rows that were appended on prior runs but never built
+- Skips articles that are already in Asana (`In Asana=Y`)
+
+If the filtered set is empty, exit the pipeline — there's nothing to do.
+
+The rest of Phase 1.5 (Step 5.5a and 5.5b below) checks whether the target article was already processed via an ad-hoc route, and routes the pipeline accordingly.
 
 ### Step 5.5a: Search Asana
 
@@ -262,7 +279,7 @@ The decision and reasoning must appear in the Phase 4 final report so it's clear
 
 ### Step 6: Fetch article content
 
-For the FIRST (most recent) new article, fetch the article page with `web_fetch`. The body will likely exceed the inline limit — parse from the temp file the same way as Phase 1 Step 1.
+For the **target article** identified in Phase 1.5 Step 5.5, fetch the article page with `web_fetch` (or via the Webflow CMS MCP `data_cms_tool` if WebFetch is blocked — the Webflow CMS fallback is also available as a fallback for Phase 1's site scrape).
 
 Extract and stash for use by both subagents:
 
@@ -463,7 +480,7 @@ All Canva template/folder/brand-kit IDs and all Asana project/section/assignee/c
 
 **Sheet write fails (Phase 1):** If the webhook returns an error (e.g., Vercel deploy is down, refresh token revoked), save the proposed rows to the backup file and stop the pipeline. Do NOT proceed to Phase 2-4 without a confirmed tracker write — that's how duplicate work happens.
 
-**Multiple new articles in one run:** Process only the FIRST (most recent) new article in Phases 2-4. All new articles get added to the tracker in Phase 1. Tell the user how many Phase 2+ candidates remain.
+**Multiple unprocessed articles** (newly-scraped + backlog from prior runs): Phase 2-4 processes exactly one per run — the most recent unprocessed article, per Phase 1.5 Step 5.5's selection rule. Older unprocessed articles get picked up by subsequent runs (which fire twice daily). Tell the user how many backlog candidates remain after this run.
 
 **Curly-quote drift:** Webflow renders straight quotes (`'`) but Google Sheets sometimes auto-corrects to curly (`’`). Always normalize quote characters before comparing titles.
 
@@ -498,9 +515,9 @@ Total: roughly 230-275K tokens per article processed, comparable to the old sing
 
 When this skill is invoked from a scheduled task (no user present, no laptop required):
 
-- Phase 1 runs to completion: scrape, read tracker, POST new article rows to the webhook.
-- Phase 1.5 preflight runs against the first new article. If it says "already in Asana," skip ahead to Phase 4 Step 11 (flip flag) and exit. If "already done end to end," exit immediately.
-- Phase 2-4 proceed automatically for the FIRST new article only, **only if Phase 1.5 says proceed AND Phase 1 webhook write succeeded AND Step 6 found a usable hero image**.
+- Phase 1 runs to completion: scrape, read tracker, append new article rows via the webhook.
+- Phase 1.5 selects the most recent unprocessed article (`In Asana != Y`) and runs the preflight on it. If Asana already has it, skip ahead to Phase 4 Step 11 (flip flag) and exit. If both checks positive (fully done), exit immediately. If no unprocessed article exists at all, exit.
+- Phase 2-4 proceed automatically for the selected target article only, **only if Phase 1.5 says proceed AND Step 6 found a usable hero image**.
 - Reviewer FAIL halts at Phase 3, saves the FAIL report, does NOT create Asana tasks.
 - Reviewer PASS continues through Phase 4.
 - Final output is a markdown report. If running locally with access to `/Users/andrewnagle/Claude/Wet Ink Organic Social Posts/`, save it as `content-pipeline-<YYYY-MM-DD>.md` there. If running as a remote CCR routine (no local filesystem access), print the report as the final assistant message instead — it'll show up in the routine's run log at claude.ai/code/routines.

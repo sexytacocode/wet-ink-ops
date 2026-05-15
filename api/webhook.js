@@ -42,8 +42,21 @@
  *   GOOGLE_OAUTH_REFRESH_TOKEN   refresh token captured for the
  *                                spreadsheets scope as andrew@hollyrandallagency.com
  *   SPREADSHEET_ID               the tracker sheet's ID
- *   WEBHOOK_SECRET               any random string; callers must send
- *                                this as the X-Webhook-Secret header
+ *   WEBHOOK_SECRET               any random string; callers send this
+ *                                as the X-Webhook-Secret header (POST)
+ *                                or as the &secret= query param (GET)
+ *
+ * Two transports supported:
+ *   POST  — JSON body, secret in `X-Webhook-Secret` header. Use this
+ *           whenever you can; secret stays out of URLs.
+ *   GET   — `?action=foo&secret=BAR&title=...&date=...`. Same actions
+ *           as POST, secret in query. Exists because the claude.ai
+ *           CCR sandbox can only call this URL via
+ *           `mcp__Vercel__web_fetch_vercel_url` (GET-only, no custom
+ *           headers). Secret-in-query has weaker hygiene than
+ *           secret-in-header — rotate WEBHOOK_SECRET periodically.
+ *           A bare GET with no query params returns a health-check
+ *           message and requires no auth.
  */
 
 const { google } = require('googleapis');
@@ -299,21 +312,41 @@ module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Webhook-Secret');
   if (req.method === 'OPTIONS') return res.status(204).end();
 
-  if (req.method === 'GET') {
-    return res.status(200).json({ ok: true, message: 'wet-ink tracker webhook is live' });
-  }
-  if (req.method !== 'POST') {
+  // Resolve action source for both POST (JSON body + header secret) and GET
+  // (query params + query secret). GET-with-query is the CCR-sandbox path:
+  // the cloud routine can only reach this URL via mcp__Vercel__web_fetch_vercel_url
+  // which is GET-only and doesn't support custom headers. Secret-in-query is
+  // a security regression vs header auth — keep the secret strong and rotate
+  // periodically.
+  const secret = process.env.WEBHOOK_SECRET;
+  let body = {};
+  let providedSecret = '';
+
+  if (req.method === 'POST') {
+    body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
+    providedSecret = req.headers['x-webhook-secret'] || '';
+  } else if (req.method === 'GET') {
+    const url = new URL(req.url, 'https://placeholder.example');
+    const action = url.searchParams.get('action');
+    if (!action) {
+      // Bare GET — health check, no auth required, no action taken
+      return res.status(200).json({ ok: true, message: 'wet-ink tracker webhook is live' });
+    }
+    providedSecret = url.searchParams.get('secret') || '';
+    body.action = action;
+    for (const k of ['title', 'date', 'row']) {
+      if (url.searchParams.has(k)) body[k] = url.searchParams.get(k);
+    }
+    if (body.row !== undefined) body.row = Number(body.row);
+  } else {
     return res.status(405).json({ ok: false, error: 'method not allowed' });
   }
 
-  // Shared-secret check
-  const secret = process.env.WEBHOOK_SECRET;
-  if (secret && req.headers['x-webhook-secret'] !== secret) {
+  // Shared-secret check (applies to both POST header and GET query)
+  if (secret && providedSecret !== secret) {
     return res.status(401).json({ ok: false, error: 'unauthorized' });
   }
 
-  // Vercel parses JSON bodies automatically when Content-Type is application/json
-  const body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
   const spreadsheetId = process.env.SPREADSHEET_ID;
 
   if (!spreadsheetId) {

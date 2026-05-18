@@ -54,7 +54,7 @@ Pick the **target article** for this run — defined as the tracker row with the
 
 **Phase 2 — Build (parallel subagents, only if Phase 1.5 says proceed)**
 For the target article from Phase 1.5, fan out two subagents simultaneously from the same article inputs:
-- **Reel subagent** — invokes `instagram-reels` (which pulls `wet-ink-voice` for on-design copy). Produces Uncensored + SFW designs and returns the uploaded asset_id.
+- **Reel subagent** — invokes `instagram-reels` (which pulls `wet-ink-voice` for on-design copy). Produces Uncensored + SFW designs and returns the list of uploaded `asset_ids` (one per article image) plus the per-scene assignment.
 - **Caption subagent** — invokes `social-post-optimizer` + `wet-ink-voice`. Produces Instagram caption, hashtags, and X/Twitter copy (both Uncensored and SFW).
 
 **Phase 3 — Review (image-fidelity gate)**
@@ -221,16 +221,31 @@ This phase has two jobs:
 
 ### Step 5.5 (pre-select): Identify the target article
 
-From the `list_titles` response in Phase 1 Step 2 (still in context), filter to rows where `in_asana` is `"N"`, blank, `"—"`, or anything other than `"Y"`. Sort that filtered set by `Published Date` descending — newest first. The first row is the **target article**.
+From the `list_titles` response in Phase 1 Step 2 (still in context), filter rows by **both** criteria:
+1. `in_asana` is `"N"`, blank, `"—"`, or anything other than `"Y"`.
+2. `Published Date` is on or after **`2026-05-10`**. Parse the date string (formats vary — `"May 14, 2026"`, `"May 8, 2026"`, etc.) into a comparable date and skip anything older. **This is the backlog cutoff** — older articles in the tracker are considered out-of-scope for the pipeline. Andrew will deal with pre-May-10 backlog manually if at all.
+
+Sort that filtered set by `Published Date` descending — newest first. The first row is the **target article** for this iteration.
 
 This rule naturally:
 - Picks up freshly-scraped articles immediately (they were appended with `In Asana=N` in Phase 1 Step 4)
-- Catches up "backlog" rows that were appended on prior runs but never built
+- Catches up "backlog" rows from the last few days that were appended on prior runs but never built
 - Skips articles that are already in Asana (`In Asana=Y`)
+- Skips the long tail of older articles (~70 pre-May-10 rows that aren't worth retroactively building)
 
 If the filtered set is empty, exit the pipeline — there's nothing to do.
 
 The rest of Phase 1.5 (Step 5.5a and 5.5b below) checks whether the target article was already processed via an ad-hoc route, and routes the pipeline accordingly.
+
+### Multi-article runs
+
+After completing Phase 4 Step 12 (or Phase 4 Step 11 if Asana already had the article), **loop back to Step 5.5 with the remaining eligible articles**. Process up to **10 articles per run** (a safety cap; lift it later if needed). Stop conditions:
+
+- Filtered set is empty (no more eligible articles)
+- Loop has executed 10 times in this run (cap)
+- Any iteration hits a fatal error (Phase 1 webhook write fails, no hero image, reviewer INCONCLUSIVE for unrecoverable reasons)
+
+Each iteration is independent — Phase 1 is NOT re-run within the loop (already done for this run). Just Phase 1.5 → 2 → 3 → 4, with a fresh target article selection at the start of each iteration.
 
 ### Step 5.5a: Search Asana
 
@@ -286,12 +301,28 @@ Extract and stash for use by both subagents:
 - `title` — full article title
 - `body_excerpt` — opening 2-3 paragraphs (enough for caption + reel hook drafting)
 - `key_claims` — 2-3 of the article's strongest claims
-- `hero_image_url` — the top `cdn.prod.website-files.com` image URL on the article page
+- **`article_image_urls` — an ORDERED LIST of every content image** in the article. See "Image extraction rules" below.
 - `author` — author name if available
 - `category` — Side Notes / Industry / Business / Features / Creators / Galleries
 - `article_url` — full URL
 
-**If `hero_image_url` is missing or clearly not article-specific, do NOT proceed to Phase 2.** Save a report flagging "no usable hero image" and stop. The whole pipeline depends on the article image being available — letting it proceed is what causes the template-image leak in the first place.
+**If `article_image_urls` is empty, do NOT proceed to Phase 2.** Save a report flagging "no usable article images" and stop. The pipeline depends on at least one article-specific image being available.
+
+#### Image extraction rules
+
+The first image in the list is the **hero** — it should always be present. Subsequent images come from the article body. The Reel build distributes images across the 5 scenes (see `instagram-reels` SKILL.md for the distribution algorithm).
+
+**When fetching via Webflow CMS (`data_cms_tool`)**:
+- Hero image lives in the post's featured-image / main-image / thumbnail field (depending on the collection schema). Take it as element 0 of the list.
+- Body images live as `<img src="...">` tags inside the post's rich-text body field (typically `post-body`, `content`, or `article-body`). Parse the HTML, extract every `<img>` whose `src` is on `cdn.prod.website-files.com`. Append them in document order.
+
+**When scraping the live page (`web_fetch` or raw HTML)**:
+- Hero image is the CSS `background-image` on the `.hero-image` div (NOT an `<img>` tag — the page uses CSS bg for the header).
+- Body images are `<img>` tags inside the article body, NOT inside `.side-social-button`, `.social-icon`, `.menu-*`, `.post-thumb` (related-posts thumbnails in the footer), or any nav/footer chrome. Filter aggressively — only inline `<img>` tags on `cdn.prod.website-files.com` with `naturalWidth > 200`.
+
+**De-duplicate.** If the same URL appears in both the hero field and the body (the CMS sometimes auto-inserts the hero into the body), keep only the first occurrence.
+
+**Validation.** Each URL should match `https://cdn.prod.website-files.com/...\.(jpe?g|png|webp)`. Drop anything that doesn't, plus anything that looks like an icon or thumbnail (path includes `icon`, `thumb`, `avatar`, `logo`).
 
 ### Step 7: Spawn the two build subagents in parallel
 
@@ -306,17 +337,30 @@ for this article:
 Title: {title}
 Body excerpt: {body_excerpt}
 Key claims: {key_claims}
-Hero image URL: {hero_image_url}
+Article image URLs (ordered, hero first): {article_image_urls}
 Author: {author}
 Category: {category}
+
+The reels skill's Step 3 must upload ALL of the article image URLs
+above (not just the first one) and distribute them across the 5
+scenes per the skill's distribution algorithm. The reviewer's
+coverage check will FAIL if any uploaded image isn't used in at
+least one scene, so this isn't optional.
 
 Return a structured result:
   uncensored_design_id: ...
   uncensored_edit_url: https://www.canva.com/design/.../edit
   sfw_design_id: ...
   sfw_edit_url: https://www.canva.com/design/.../edit
-  uploaded_asset_id: ...   ← required for Phase 3 reviewer
-  step_7_self_check_flags: [...] ← any flags raised by the reels skill's inline checks
+  uploaded_asset_ids: [...]   ← LIST. one per uploaded article image, in upload order.
+                                 Required for Phase 3 reviewer.
+  scene_asset_assignment:     ← which uploaded asset_id ended up on each of the 5 scenes
+    scene_1: <asset_id>
+    scene_2: <asset_id>
+    scene_3: <asset_id>
+    scene_4: <asset_id>
+    scene_5: <asset_id>
+  step_7_5_flags: [...]       ← any flags raised by the reels skill's inline QA checks
 
 Do NOT create Asana tasks. That happens in Phase 4 of the parent pipeline.
 ```
@@ -361,7 +405,7 @@ Spawn the `reel-image-reviewer` subagent:
 Run the reel-image-reviewer agent.
 
 Inputs:
-- expected_asset_ids: [{uploaded_asset_id}]   # wrap the single uploaded asset_id in a list; reviewer takes a list to support multi-photo articles in the future
+- expected_asset_ids: {uploaded_asset_ids}    # the FULL list returned by the Reel subagent — one entry per uploaded article image. Order matches the article_image_urls input.
 - designs:
     - { id: {uncensored_design_id}, version: "Uncensored" }
     - { id: {sfw_design_id}, version: "SFW" }
@@ -516,8 +560,9 @@ Total: roughly 230-275K tokens per article processed, comparable to the old sing
 When this skill is invoked from a scheduled task (no user present, no laptop required):
 
 - Phase 1 runs to completion: scrape, read tracker, append new article rows via the webhook.
-- Phase 1.5 selects the most recent unprocessed article (`In Asana != Y`) and runs the preflight on it. If Asana already has it, skip ahead to Phase 4 Step 11 (flip flag) and exit. If both checks positive (fully done), exit immediately. If no unprocessed article exists at all, exit.
-- Phase 2-4 proceed automatically for the selected target article only, **only if Phase 1.5 says proceed AND Step 6 found a usable hero image**.
+- Phase 1.5 selects the most recent unprocessed article (`In Asana != Y` AND `Published Date >= 2026-05-10`) and runs the preflight on it. If Asana already has it, skip ahead to Phase 4 Step 11 (flip flag) for that article. If both checks positive (fully done), skip to the loop check. If no eligible article exists at all, exit.
+- Phase 2-4 proceed for the selected target article, **only if Phase 1.5 says proceed AND Step 6 found at least one usable article image**.
+- After each Phase 4 completes (or after Phase 1.5 routes around Phase 2-3), **loop back to Phase 1.5** and process the next eligible article. Up to 10 articles per run (safety cap).
 - Reviewer FAIL halts at Phase 3, saves the FAIL report, does NOT create Asana tasks.
 - Reviewer PASS continues through Phase 4.
 - Final output is a markdown report. If running locally with access to `/Users/andrewnagle/Claude/Wet Ink Organic Social Posts/`, save it as `content-pipeline-<YYYY-MM-DD>.md` there. If running as a remote CCR routine (no local filesystem access), print the report as the final assistant message instead — it'll show up in the routine's run log at claude.ai/code/routines.

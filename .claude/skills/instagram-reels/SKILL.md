@@ -104,7 +104,7 @@ Collect the following for the target article:
 - **Hook line** (1 punchy sentence for scene 2 — the most scroll-stopping claim)
 - **Key insight** (1-2 short sentences for scene 3 — the article's core argument)
 - **Closing line** (1 sentence for scene 4 — a takeaway or provocative question)
-- **Hero image URL** (used across scenes as the background/key visual)
+- **Article image URLs** (ordered list, hero first, then any additional inline body images). Used as the background visual across the 5 scenes — see Step 3 for the distribution algorithm. Most articles have just one image; some have 2-5. Pass them in as a list even if there's only one.
 Use `conversation_search` to find article details from past newsletter builds or other conversations. The newsletter-content skill workflow produces summaries and bullets that work well as Reels text.
  
 **Reels text guidelines — critical differences from carousels:**
@@ -125,15 +125,51 @@ Search for and load the following Canva tools (they are deferred and must be loa
 - `Asana:create_tasks` — to create editing tasks for Natasha (load via `tool_search` query "create tasks")
 **Important:** Load these tools early in the conversation before they cycle out of context.
  
-### Step 3: Upload Article Image
+### Step 3: Upload Article Images (one upload call per image)
+ 
+You're given an **ordered list of article image URLs** — the hero first, then any inline body images. Upload EACH one via `Canva:upload-asset-from-url` in a separate call, in order. Save the returned `asset_id` for each.
  
 ```
-Canva:upload-asset-from-url
-  name: "[Article Title] Reel Image"
-  url: [hero image URL]
+For each url in article_image_urls:
+  Canva:upload-asset-from-url
+    name: "[Article Title] Reel Image N"   # N = 1-indexed position
+    url: [the url]
+  → record asset_id in uploaded_asset_ids list, same order as the inputs
 ```
  
-Save the returned `asset_id` — you'll need it for image swaps across scenes.
+After all uploads complete you should have `uploaded_asset_ids = [hero_asset_id, body1_asset_id, body2_asset_id, ...]`. The reviewer's coverage check enforces that **every** uploaded asset is used in at least one scene, so don't upload anything you don't intend to assign — the count matters.
+ 
+#### Scene → image distribution
+ 
+The Reel has 5 scenes. Map each scene to one of the uploaded images using this algorithm (1-indexed scene number):
+ 
+```
+N = len(uploaded_asset_ids)
+ 
+if N == 1:
+  every scene uses asset 0   (i.e. uploaded_asset_ids[0])
+if N == 2:
+  scenes 1, 3, 5 → asset 0 (hero)
+  scenes 2, 4    → asset 1 (body)
+if N == 3:
+  scenes 1, 4 → asset 0 (hero)
+  scenes 2, 5 → asset 1
+  scene  3    → asset 2
+if N == 4:
+  scenes 1, 5 → asset 0
+  scene  2    → asset 1
+  scene  3    → asset 2
+  scene  4    → asset 3
+if N >= 5:
+  scene i (1-indexed) → asset (i-1)
+  (any extra uploads beyond 5 are unused — flag this in step_7_5_flags
+   because the reviewer's coverage check WILL fail; the parent pipeline
+   should either trim its input list or accept the build failure)
+```
+ 
+The hero ALWAYS appears on scene 1 (the cover). Body images fill in 2, 3, 4 in order. Scene 5 (CTA) gets the hero when there are fewer than 5 images so it ends on a strong visual.
+ 
+Build a `scene_asset_assignment` map (`{scene_1: asset_id, scene_2: asset_id, ...}`) — you'll use it in Step 6's `update_fill` operations and return it to the parent pipeline.
  
 ### Step 4: Duplicate the Template
  
@@ -218,15 +254,15 @@ Canva:perform-editing-operations
     { type: "update_title", title: "[Article Title] - Instagram Reel" },
     { type: "replace_text", element_id: "[title element]", text: "[Full Article Title]" },
     { type: "replace_text", element_id: "[subtitle element]", text: "[Subtitle sentence]" },
-    { type: "update_fill", element_id: "[scene 1 editable image]", asset_type: "image", asset_id: "[uploaded asset ID]", alt_text: "[description]" },
+    { type: "update_fill", element_id: "[scene 1 editable image]", asset_type: "image", asset_id: "[scene_asset_assignment.scene_1]", alt_text: "[description]" },
     { type: "replace_text", element_id: "[scene 2 hook element 1]", text: "[Hook part 1]" },
     { type: "replace_text", element_id: "[scene 2 hook element 2]", text: "[Hook part 2]" },
-    { type: "update_fill", element_id: "[scene 2 editable image]", ... },
+    { type: "update_fill", element_id: "[scene 2 editable image]", asset_id: "[scene_asset_assignment.scene_2]", ... },
     { type: "replace_text", element_id: "[scene 3 insight element]", text: "[Key insight]" },
-    { type: "update_fill", element_id: "[scene 3 editable image]", ... },
+    { type: "update_fill", element_id: "[scene 3 editable image]", asset_id: "[scene_asset_assignment.scene_3]", ... },
     { type: "replace_text", element_id: "[scene 4 closing element]", text: "[Closing line]" },
-    { type: "update_fill", element_id: "[scene 4 editable image]", ... },
-    { type: "update_fill", element_id: "[scene 5 editable image]", ... }
+    { type: "update_fill", element_id: "[scene 4 editable image]", asset_id: "[scene_asset_assignment.scene_4]", ... },
+    { type: "update_fill", element_id: "[scene 5 editable image]", asset_id: "[scene_asset_assignment.scene_5]", ... }
   ]
 ```
  
@@ -259,7 +295,13 @@ Repeat for both versions before presenting final links to the user.
  
 1. **No stale template text remains.** Check every text element returned in the editing response. If any element still contains text from the original template article (e.g., "Luna Star," "Made For Porn"), it must be replaced or deleted before committing.
 2. **Title font size — flag for manual adjustment.** The Canva MCP API cannot reliably change the title font size (see Title element rules above). **Always include this in the final message to the user:** "The title font resets to ~63px after text replacement. Open in Canva, select the title, and increase to 90–120px." Do NOT claim the font size was set correctly — it wasn't.
-3. **All 5 background images were swapped.** Confirm all 5 editable fill elements show the uploaded article `asset_id`, not the template's original `asset_id`. Note that scenes 1 and 2 have page-level editable fills (element_id = page_id), while scenes 3-5 have sub-element fills. Compare the asset IDs directly — do not assume success from the operation status alone.
+3. **All 5 background images were swapped per `scene_asset_assignment`.** Confirm each scene's editable fill matches the assignment computed in Step 3:
+   - Scene 1's fill = `scene_asset_assignment.scene_1`
+   - Scene 2's fill = `scene_asset_assignment.scene_2`
+   - ...etc
+   None of them should be the template's original placeholder (`MAHILDNd6sQ`).
+   For multi-image articles, ALSO verify every uploaded asset appears in at least one scene — if `uploaded_asset_ids` has 2+ entries and any one of them isn't referenced anywhere across scenes 1-5, the Reel subagent skipped an image and the reviewer will FAIL coverage. Fix before committing.
+   Note that scenes 1 and 2 have page-level editable fills (`element_id = page_id`) while scenes 3-5 have sub-element fills. Compare the asset IDs directly — do not assume success from the operation status alone.
 4. **White vertical lines match adjacent text heights.** Compare each SHAPE element's `dimension.height` to its adjacent TEXT element's `dimension.height`. They should be within 5px. If not, resize.
 5. **Scene 5 (CTA) text is unchanged.** Confirm "read the full article on" and "WETINKMAG.COM" are still the template defaults.
 6. **All Canva links use the canonical `https://www.canva.com/design/{design_id}/edit` format.** Do NOT use the `edit_url` shortlink (`/d/{slug}`) returned by the API. This applies to user-facing chat output, Asana task notes, and any other place a Canva link appears.

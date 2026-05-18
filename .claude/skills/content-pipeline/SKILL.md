@@ -313,8 +313,15 @@ Extract and stash for use by both subagents:
 The first image in the list is the **hero** — it should always be present. Subsequent images come from the article body. The Reel build distributes images across the 5 scenes (see `instagram-reels` SKILL.md for the distribution algorithm).
 
 **When fetching via Webflow CMS (`data_cms_tool`)**:
-- Hero image lives in the post's featured-image / main-image / thumbnail field (depending on the collection schema). Take it as element 0 of the list.
-- Body images live as `<img src="...">` tags inside the post's rich-text body field (typically `post-body`, `content`, or `article-body`). Parse the HTML, extract every `<img>` whose `src` is on `cdn.prod.website-files.com`. Append them in document order.
+The Wet Ink Posts collection schema has **two separate top-level image fields** plus inline body images. Extract all three categories:
+
+1. **`fieldData["main-image"].url`** — the article-page hero. Place at **element 0** of `article_image_urls`.
+2. **`fieldData["thumbnail-image"].url`** — the listing-card thumbnail. **This is a SEPARATE field with a DIFFERENT image** (typically a different shot from the same photoshoot — confirmed for Wet Ink posts). Place at **element 1**. Do NOT assume it duplicates `main-image`; verify by URL and de-dupe only if the URLs literally match.
+3. **Body images** — parse `fieldData["content"]` (rich-text HTML). Extract every `<img src="...">` whose `src` is on `cdn.prod.website-files.com`. Append them in document order starting at element 2.
+
+Final `article_image_urls` for a typical Wet Ink post: `[main-image, thumbnail-image, body_img1, body_img2, ...]`. Most posts will produce 2-4 entries. The N≥2 distribution rule in `instagram-reels` Step 3 handles all the spreads.
+
+If `main-image` is missing or empty, fall back to `thumbnail-image` as element 0. If both are missing, do NOT proceed to Phase 2 — see the "If `article_image_urls` is empty" rule below.
 
 **When scraping the live page (`web_fetch` or raw HTML)**:
 - Hero image is the CSS `background-image` on the `.hero-image` div (NOT an `<img>` tag — the page uses CSS bg for the header).

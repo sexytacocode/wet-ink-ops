@@ -283,6 +283,13 @@ async function flipInAsana(sheets, spreadsheetId, body) {
     return { ok: false, error: 'no article rows found in tracker' };
   }
 
+  // Optional `value` param (default "Y"). Lets the pipeline flip BACK to N
+  // for rebuild scenarios. Anything other than Y/N is rejected.
+  const newValue = (body.value || 'Y').toString().toUpperCase();
+  if (newValue !== 'Y' && newValue !== 'N') {
+    return { ok: false, error: `value must be Y or N (got: ${body.value})` };
+  }
+
   const bRes = await sheets.spreadsheets.values.get({
     spreadsheetId,
     range: `${SHEET_NAME}!B2:B${lastDataRow}`,
@@ -297,9 +304,9 @@ async function flipInAsana(sheets, spreadsheetId, body) {
         spreadsheetId,
         range: `${SHEET_NAME}!J${row}`,
         valueInputOption: 'USER_ENTERED',
-        requestBody: { values: [['Y']] },
+        requestBody: { values: [[newValue]] },
       });
-      return { ok: true, action: 'flip_in_asana', row, title: body.title };
+      return { ok: true, action: 'flip_in_asana', row, value: newValue, title: body.title };
     }
   }
   return { ok: false, error: 'title not found: ' + body.title };

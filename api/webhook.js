@@ -26,8 +26,13 @@
  *
  *   { action: "list_titles" }
  *     → returns every row in the Article Coverage table as
- *       { row, num, title, date, in_asana }. Lets the daily pipeline
- *       diff against the tracker without needing the Drive MCP.
+ *       { row, num, title, date, in_asana, carousel }. Lets the daily
+ *       pipeline diff against the tracker without needing the Drive MCP.
+ *
+ *   { action: "flip_carousel", title: "<title>", value: "Y" | "N" }
+ *     → finds the row by title (normalized) and sets column K
+ *       ("Carousel") to the given value. Used by Phase 4 to mark an
+ *       article as carousel-built. Default value is "Y".
  *
  * Auth: OAuth user refresh token (reuses the existing wet-ink-analytics
  * Internal OAuth client). No service account — blocked by org policy
@@ -194,7 +199,7 @@ async function appendArticle(sheets, spreadsheetId, body) {
     },
   });
 
-  // Fill the new row (10 columns A-J)
+  // Fill the new row (11 columns A-K)
   const rowValues = [
     nextNum,                // A: #
     body.title || '',       // B: Article Title
@@ -206,10 +211,11 @@ async function appendArticle(sheets, spreadsheetId, body) {
     'Y',                    // H: Create Post?
     'Reel',                 // I: New Post Type
     'N',                    // J: In Asana
+    'N',                    // K: Carousel
   ];
   await sheets.spreadsheets.values.update({
     spreadsheetId,
-    range: `${SHEET_NAME}!A${insertRow}:J${insertRow}`,
+    range: `${SHEET_NAME}!A${insertRow}:K${insertRow}`,
     valueInputOption: 'USER_ENTERED',
     requestBody: { values: [rowValues] },
   });
@@ -230,10 +236,13 @@ async function listTitles(sheets, spreadsheetId) {
     return { ok: true, action: 'list_titles', count: 0, rows: [] };
   }
 
-  // Pull A2:J<lastDataRow> in one call
+  // Pull A2:K<lastDataRow> in one call (11 columns: A-K).
+  // Column K is "Carousel" — tracks whether a carousel has been built
+  // for that article. Cycle: every 3rd article in the May 10+ window
+  // gets a carousel built in addition to the Reels.
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${SHEET_NAME}!A2:J${lastDataRow}`,
+    range: `${SHEET_NAME}!A2:K${lastDataRow}`,
   });
   const values = res.data.values || [];
   const rows = values.map((r, i) => ({
@@ -242,6 +251,7 @@ async function listTitles(sheets, spreadsheetId) {
     title: r[1] || '',
     date: r[2] || '',
     in_asana: r[9] || '', // column J
+    carousel: r[10] || '', // column K
   })).filter((r) => r.title); // drop rows with empty title (shouldn't normally happen)
 
   return {
@@ -250,6 +260,40 @@ async function listTitles(sheets, spreadsheetId) {
     count: rows.length,
     rows,
   };
+}
+
+async function flipCarousel(sheets, spreadsheetId, body) {
+  const insertRow = await findInsertRow(sheets, spreadsheetId);
+  const lastDataRow = insertRow - 1;
+  if (lastDataRow < 2) {
+    return { ok: false, error: 'no article rows found in tracker' };
+  }
+
+  const newValue = (body.value || 'Y').toString().toUpperCase();
+  if (newValue !== 'Y' && newValue !== 'N') {
+    return { ok: false, error: `value must be Y or N (got: ${body.value})` };
+  }
+
+  const bRes = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `${SHEET_NAME}!B2:B${lastDataRow}`,
+  });
+  const target = normalizeTitle(body.title);
+  const values = bRes.data.values || [];
+
+  for (let i = 0; i < values.length; i++) {
+    if (normalizeTitle((values[i] || [])[0] || '') === target) {
+      const row = i + 2;
+      await sheets.spreadsheets.values.update({
+        spreadsheetId,
+        range: `${SHEET_NAME}!K${row}`,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: { values: [[newValue]] },
+      });
+      return { ok: true, action: 'flip_carousel', row, value: newValue, title: body.title };
+    }
+  }
+  return { ok: false, error: 'title not found: ' + body.title };
 }
 
 async function deleteRow(sheets, spreadsheetId, body) {
@@ -341,7 +385,7 @@ module.exports = async function handler(req, res) {
     }
     providedSecret = url.searchParams.get('secret') || '';
     body.action = action;
-    for (const k of ['title', 'date', 'row']) {
+    for (const k of ['title', 'date', 'row', 'value']) {
       if (url.searchParams.has(k)) body[k] = url.searchParams.get(k);
     }
     if (body.row !== undefined) body.row = Number(body.row);
@@ -377,6 +421,10 @@ module.exports = async function handler(req, res) {
       }
       case 'flip_in_asana': {
         const result = await flipInAsana(sheets, spreadsheetId, body);
+        return res.status(result.ok ? 200 : 400).json(result);
+      }
+      case 'flip_carousel': {
+        const result = await flipCarousel(sheets, spreadsheetId, body);
         return res.status(result.ok ? 200 : 400).json(result);
       }
       case 'delete_row': {

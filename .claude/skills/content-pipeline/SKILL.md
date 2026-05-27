@@ -21,7 +21,7 @@ description: >
 - [ ] **Tracker webhook reachable** — Sheet reads AND writes go to `https://wet-ink-ops.vercel.app/api/webhook` (Vercel-hosted serverless function in this same repo, at `api/webhook.js`). Requires the `WEBHOOK_SECRET` env var. For local testing, pull it from Vercel with `vercel env pull .env.local && export $(grep WEBHOOK_SECRET .env.local | xargs)`. The webhook handles all sheet I/O — no Google Drive MCP, no Chrome MCP, no Apps Script. Works headlessly so the daily scheduled routine doesn't need a laptop awake or any Google connector at all.
 - [ ] **Asana MCP loaded** — Used by Phase 1.5 preflight check and Phase 4 task creation. Load via `tool_search` query `"asana"`.
 - [ ] **Subagent: `reel-image-reviewer`** — Defined at `.claude/agents/reel-image-reviewer.md`. Required for the Phase 3 gate. If unavailable (e.g. running in Claude Desktop), see "Desktop fallback" below.
-- [ ] **Skills referenced** — `instagram-reels`, `instagram-carousel`, `wet-ink-voice`, `social-post-optimizer`. Do not duplicate their rules in this skill; read them when invoked. Carousels are conditional (every 3rd article — see Phase 1.5 Step 5.5b).
+- [ ] **Skills referenced** — `instagram-reels`, `instagram-carousel`, `wet-ink-voice`, `social-post-optimizer`. Do not duplicate their rules in this skill; read them when invoked. Every article gets a carousel built alongside its Reels (no cycle gating).
 
 ---
 
@@ -59,7 +59,7 @@ Pick the **target article** for this run — defined as the tracker row with the
 For the target article from Phase 1.5, fan out subagents simultaneously from the same article inputs:
 - **Reel subagent** — invokes `instagram-reels` (which pulls `wet-ink-voice` for on-design copy). Produces Uncensored + SFW Reel designs and returns the list of uploaded `asset_ids` (one per article image) plus the per-scene assignment.
 - **Caption subagent** — invokes `social-post-optimizer` + `wet-ink-voice`. Produces Instagram caption, hashtags, and X/Twitter copy (both Uncensored and SFW).
-- **Carousel subagent** (conditional, only every 3rd article — see Phase 1.5 Step 5.5b) — invokes `instagram-carousel`. Produces one SFW carousel design with text + images swapped from the article. Carousels don't have Uncensored versions (Instagram throttles explicit content).
+- **Carousel subagent** (always spawned) — invokes `instagram-carousel`. Produces one SFW carousel design with text + images swapped from the article. Carousels don't have Uncensored versions (Instagram throttles explicit content).
 
 **Phase 3 — Review (image-fidelity gate)**
 Invoke `reel-image-reviewer` subagent with the two design_ids and the expected asset_id. Reviewer reads each design with a fresh context and verifies every scene's editable fill uses the article hero image, not a template default.
@@ -88,7 +88,7 @@ The "Article Coverage" tab contains three logical tables (the second is a separa
 1. **Article Coverage table** (rows 1..N) — the one we read & append to.
    12 columns (A–L): `# | Article Title | Published Date | Posted on IG? | Post Type | IG Post Date | IG Link | Create Post? | New Post Type | In Asana | Carousel | Webflow ID`.
    - **Column J `In Asana`** — Y once the Reel Asana tasks have been created.
-   - **Column K `Carousel`** — Y once a Carousel has been built for this article. The pipeline auto-builds carousels on a 3-article cycle (see Phase 1.5 Step 5.5b).
+   - **Column K `Carousel`** — Y once a Carousel has been built for this article. The pipeline auto-builds a carousel for **every** article (no cycle gating). Historical rows from the cycle-era may have K=N — those are not retroactively rebuilt; the column tracks "has a carousel been built for this article yet" forever forward.
    - **Column L `Webflow ID`** — the Webflow CMS item id for this article. This is the **durable unique key** threaded through the pipeline (titles are fragile: curly quotes, Webflow edits, partial matches). Populated by Phase 1 on insert and copied to the Asana `ArticleID` custom field on each task. Used as the matching key in Phase 1.5 preflight, Phase 4 verify, and Phase 0.5 self-heal.
 
 2. **Instagram Posts performance table** (rows N+1..M) — read-only for this skill; populated by other tooling.
@@ -304,26 +304,17 @@ This rule naturally:
 
 If the filtered set is empty, exit the pipeline — there's nothing to do.
 
-### Step 5.5b: Decide if the target needs a carousel
+### Step 5.5b: Carousel decision — always true
 
-After picking the target article, compute whether this article should also get a carousel built (in addition to the Reels). The pattern: **1 carousel per 3 articles** within the cycle window.
+Every article gets a carousel built in addition to its Reels. Set `needs_carousel = true` unconditionally and continue.
 
 ```
-CYCLE_START_DATE = "2026-05-18"   # Hollywood Celebrities is position 1
-processed_in_cycle = list_titles.rows.filter(
-  r -> r.date >= CYCLE_START_DATE
-       AND r.in_asana == "Y"
-       AND r.title != target.title
-)
-target_position = len(processed_in_cycle) + 1
-needs_carousel  = (target_position % 3 == 1)   # positions 1, 4, 7, 10, ...
+needs_carousel = true   # every article, no cycle gating
 ```
 
-If `needs_carousel == true`, Phase 2 spawns the carousel subagent in addition to the Reel + Caption subagents.
+(Historical note: this used to be a 1-of-3 cycle anchored at 2026-05-18. The gating was removed because the editorial value of a carousel per article outweighs the token cost. The `Carousel` column K still tracks build state per article so the self-heal can detect missing carousel tasks, but it no longer drives the decision — every fresh target gets a carousel.)
 
-(`In Asana == Y` means the row's Reels were processed; we use that as the "processed in cycle" indicator regardless of whether the carousel was also built. The `Carousel` column K tracks carousel build state separately — useful for verification and for the `instagram-carousel` skill's idempotency, but NOT for cycle counting.)
-
-If the article was already processed via ad-hoc means and the preflight (below) returns "skipped-built-already," the carousel decision is moot — that iteration doesn't build anything fresh.
+If the article was already processed via ad-hoc means and the preflight (below) returns "skipped-built-already," the carousel build is also moot — that iteration doesn't build anything fresh.
 
 The rest of Phase 1.5 (Step 5.5c and 5.5d below) checks whether the target article was already processed via an ad-hoc route, and routes the pipeline accordingly.
 
@@ -353,9 +344,10 @@ mcp__asana__search_tasks:
 
 **Why custom-field search and not title search:** titles are fragile. Webflow edits, curly-quote drift, and partial-substring false positives caused the original failure mode this whole change was designed to fix. The ArticleID custom field is the durable unique key.
 
-**Match interpretation:**
-- **2 matches** (or 3 if the article has a carousel) → **Asana has it** (full set). Treat as "skipped-built-already" and route to Phase 4 Step 11.
-- **1 match** → **half-built**. The pipeline crashed mid-Phase-4 in a previous run. Treat as "needs build" so Phase 2-4 fires and the verify step (Phase 4 Step 10.5) creates the missing task(s). Phase 4 Step 10 task creation should idempotently skip the already-existing ones (search again right before each create).
+**Match interpretation** (carousel is always expected on new builds — see Step 5.5b):
+- **3 matches** → **Asana has the full set** (Uncensored + SFW + Carousel). Treat as "skipped-built-already" and route to Phase 4 Step 11.
+- **2 matches on a historical row** (where column K Carousel == "N") → also counts as "Asana has it" for cycle-era articles that never got a carousel. Don't retroactively build one. Route to Phase 4 Step 11.
+- **1 or 2 matches on a new-era row** → **partial-built**. The pipeline crashed mid-Phase-4 in a previous run. Treat as "needs build" so Phase 2-4 fires and the verify step (Phase 4 Step 10.5) creates the missing task(s). Phase 4 Step 10 task creation should idempotently skip the already-existing ones (search again right before each create).
 - **0 matches** → **needs build** (normal path).
 
 **Fallback when `target.webflow_id` is empty** (e.g., older row from before the column existed, or Step 1.5 lookup failed): fall back to the original name-based search:
@@ -503,7 +495,7 @@ Apply wet-ink-voice rules. Respect each platform's character limits.
 Do NOT post anything. Output text only.
 ```
 
-**Carousel subagent prompt** (spawn ONLY if `needs_carousel == true` from Step 5.5b):
+**Carousel subagent prompt** (always spawn — every article gets a carousel):
 
 ```
 Read .claude/skills/instagram-carousel/SKILL.md and execute it end to end
@@ -533,7 +525,7 @@ Do NOT create Asana tasks. That happens in Phase 4 of the parent pipeline.
 
 Collect all subagent results before proceeding. If any subagent fails, stop the pipeline, save a report, and surface the failure. Do NOT proceed to Phase 3 with partial output.
 
-**Critical hand-off:** The Reel subagent MUST return `uploaded_asset_ids` (list). The reviewer cannot do its job without it. The Carousel subagent (when spawned) returns its own `uploaded_asset_ids` for its design.
+**Critical hand-off:** The Reel subagent MUST return `uploaded_asset_ids` (list). The reviewer cannot do its job without it. The Carousel subagent returns its own `uploaded_asset_ids` for its design.
 
 ---
 
@@ -577,7 +569,7 @@ If `target.webflow_id` is empty for this article (older row that wasn't backfill
 
 Create:
 - **Two Reel tasks** — Uncensored + SFW. Per the existing template below.
-- **One Carousel task** — ONLY if `needs_carousel == true` from Step 5.5b. Single SFW carousel; no Uncensored version.
+- **One Carousel task** — always (every article gets a carousel). Single SFW carousel; no Uncensored version.
 
 Augment each Reel task's `notes` field with the captions from Phase 2. The Uncensored Reel task carries `twitter_uncensored`; the SFW Reel task carries `twitter_sfw`. Both Reel tasks include the IG caption. The Carousel task includes the IG caption + hashtags only (no X/Twitter copy — carousel posts go to IG, not X).
 
@@ -604,7 +596,7 @@ Suggested X/Twitter copy ({Uncensored | SFW}):
 {twitter_uncensored or twitter_sfw}
 ```
 
-**Notes template for the Carousel task** (only when `needs_carousel`):
+**Notes template for the Carousel task** (always created):
 
 ```
 Edit text and images as needed.
@@ -613,7 +605,6 @@ Canva link: https://www.canva.com/design/{carousel_design_id}/edit
 
 Article: {title}
 Type: Instagram Carousel (SFW only)
-Cycle: This is the {nth} carousel in the rotation (every 3rd article gets one).
 
 ---
 Suggested Instagram caption:
@@ -636,8 +627,7 @@ mcp__asana__search_tasks
 ```
 
 **Expected count:**
-- N = **2** for Reel-only builds (Uncensored + SFW)
-- N = **3** for Reel + Carousel builds (Uncensored + SFW + Carousel)
+- N = **3** for every fresh build (Uncensored + SFW + Carousel — carousels are now built for every article).
 
 **If actual count != expected:** save a FAIL report to `/Users/andrewnagle/Claude/Wet Ink Organic Social Posts/content-pipeline-<YYYY-MM-DD>-VERIFY-FAIL.md` with:
 - target article (title, webflow_id, URL)
@@ -666,7 +656,7 @@ curl -X POST "https://wet-ink-ops.vercel.app/api/webhook" \
   }'
 ```
 
-**Conditionally — flip `Carousel` (column K) to Y ONLY if `needs_carousel == true` for this article:**
+**Always — flip `Carousel` (column K) to Y (every article gets a carousel):**
 
 ```bash
 curl -X POST "https://wet-ink-ops.vercel.app/api/webhook" \
@@ -689,10 +679,9 @@ Tell the user / log to the scheduled-run report:
 
 - Article(s) processed in this run (title, category, URL — one section per iteration if the loop fired multiple times)
 - Phase 1.5 preflight outcome per article (built fresh / skipped-built / skipped-done)
-- **Cycle position + carousel decision** per article (e.g., "position 4 → carousel built")
 - Reviewer verdict: PASS (or skipped if Phase 1.5 routed us around it)
-- Canva edit URLs: 2 Reels (Uncensored + SFW) per article; +1 Carousel for cycle-position-1 articles
-- Asana task URLs: 2 Reel tasks per article; +1 Carousel task for cycle-position-1 articles
+- Canva edit URLs: 2 Reels (Uncensored + SFW) + 1 Carousel per article
+- Asana task URLs: 2 Reel tasks + 1 Carousel task per article
 - IG caption preview (first 100 chars)
 - Number of remaining eligible articles (post-May-10, `In Asana != Y`)
 - "Run the pipeline again in a fresh conversation to process the next article."
@@ -747,11 +736,11 @@ All Canva template/folder/brand-kit IDs and all Asana project/section/assignee/c
 
 ---
 
-## CAROUSELS — AUTOMATED ON A 3-ARTICLE CYCLE
+## CAROUSELS — AUTOMATED FOR EVERY ARTICLE
 
-The pipeline now builds carousels automatically — every 3rd article in the cycle window (anchor: 2026-05-18 = Hollywood Celebrities = position 1) gets a carousel built in addition to its Reels. See Phase 1.5 Step 5.5b for the math.
+The pipeline builds a carousel for every article in addition to its Reels — no cycle gating. Set in Phase 1.5 Step 5.5b (`needs_carousel = true`, always).
 
-To build a carousel for an article that the cycle didn't pick up (e.g., one that fell on a non-carousel position but you want a carousel anyway), invoke the `instagram-carousel` skill directly:
+To retroactively build a carousel for an older article (cycle-era row where K = N), invoke the `instagram-carousel` skill directly:
 
 > "Create an Instagram carousel for [article title]"
 
@@ -770,11 +759,11 @@ curl -X POST "https://wet-ink-ops.vercel.app/api/webhook" \
 Parallel subagents change the math vs. the old serial design:
 
 - **Phase 1 only (detect + sheet append):** ~25-40K tokens (main context)
-- **Phase 2 parallel build:** ~150K Reel subagent + ~30K caption subagent (isolated contexts, run concurrently). **Plus ~100K Carousel subagent on cycle-position-1 articles.**
+- **Phase 2 parallel build:** ~150K Reel subagent + ~30K caption subagent + ~100K Carousel subagent (isolated contexts, run concurrently).
 - **Phase 3 reviewer:** ~15-25K reviewer subagent (isolated context)
 - **Phase 4 commit + main coordination overhead:** ~30K main context
 
-Total: ~230-275K tokens per Reel-only article, ~330-375K tokens for cycle-position-1 articles (Reel + Carousel). Wall-clock time is faster because subagents run in parallel.
+Total: ~330-375K tokens per article (Reel + Carousel always). Wall-clock time is faster because subagents run in parallel.
 
 ---
 

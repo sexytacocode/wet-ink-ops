@@ -8,11 +8,15 @@
  *   { action: "ping" }
  *     → { ok: true, message: "pong" }
  *
- *   { action: "append", title: "<title>", date: "<Month DD, YYYY>" }
+ *   { action: "append", title: "<title>", date: "<Month DD, YYYY>",
+ *     webflow_id: "<optional Webflow CMS item id>" }
  *     → inserts a new row at the end of the Article Coverage table
  *       (just above the Instagram Posts table header), auto-computes
- *       the next # from the highest existing value, fills the 10
- *       default columns. Idempotent — duplicate title is skipped.
+ *       the next # from the highest existing value, fills the 12
+ *       default columns (A-L). Column L holds the Webflow CMS item ID,
+ *       which is the durable unique key threaded through the pipeline
+ *       (titles are fragile — curly quotes, Webflow edits, partial
+ *       matches). Idempotent — duplicate title is skipped.
  *
  *   { action: "flip_in_asana", title: "<title>" }
  *     → finds the row by title (normalized: lowercased, curly quotes
@@ -26,13 +30,26 @@
  *
  *   { action: "list_titles" }
  *     → returns every row in the Article Coverage table as
- *       { row, num, title, date, in_asana, carousel }. Lets the daily
- *       pipeline diff against the tracker without needing the Drive MCP.
+ *       { row, num, title, date, in_asana, carousel, webflow_id }. Lets
+ *       the daily pipeline diff against the tracker without needing the
+ *       Drive MCP.
  *
  *   { action: "flip_carousel", title: "<title>", value: "Y" | "N" }
  *     → finds the row by title (normalized) and sets column K
  *       ("Carousel") to the given value. Used by Phase 4 to mark an
  *       article as carousel-built. Default value is "Y".
+ *
+ *   { action: "set_webflow_id", title: "<title>", webflow_id: "<id>" }
+ *     OR { action: "set_webflow_id", row: <int>, webflow_id: "<id>" }
+ *     → finds the row by normalized title OR by direct row number and
+ *       writes the Webflow CMS item id into column L. Used by the
+ *       backfill script to populate column L for rows that predate the
+ *       webflow_id column.
+ *
+ *   { action: "lookup_by_webflow_id", webflow_id: "<id>" }
+ *     → returns the row matching that Webflow id (same shape as a
+ *       list_titles row entry) or { ok: false, error: "not found" }.
+ *       Lets the pipeline resolve an article by its durable key.
  *
  * Auth: OAuth user refresh token (reuses the existing wet-ink-analytics
  * Internal OAuth client). No service account — blocked by org policy
@@ -199,23 +216,28 @@ async function appendArticle(sheets, spreadsheetId, body) {
     },
   });
 
-  // Fill the new row (11 columns A-K)
+  // Fill the new row (12 columns A-L). Column L is the Webflow CMS item
+  // id — the durable unique key the pipeline uses to thread state
+  // between the tracker, Canva, and Asana. Empty string is acceptable
+  // for callers that don't have it (older callers, manual inserts) but
+  // the daily pipeline should always supply it.
   const rowValues = [
-    nextNum,                // A: #
-    body.title || '',       // B: Article Title
-    body.date || '',        // C: Published Date
-    'N',                    // D: Posted on IG?
-    '',                     // E: Post Type
-    '',                     // F: IG Post Date
-    '',                     // G: IG Link
-    'Y',                    // H: Create Post?
-    'Reel',                 // I: New Post Type
-    'N',                    // J: In Asana
-    'N',                    // K: Carousel
+    nextNum,                  // A: #
+    body.title || '',         // B: Article Title
+    body.date || '',          // C: Published Date
+    'N',                      // D: Posted on IG?
+    '',                       // E: Post Type
+    '',                       // F: IG Post Date
+    '',                       // G: IG Link
+    'Y',                      // H: Create Post?
+    'Reel',                   // I: New Post Type
+    'N',                      // J: In Asana
+    'N',                      // K: Carousel
+    body.webflow_id || '',    // L: Webflow ID
   ];
   await sheets.spreadsheets.values.update({
     spreadsheetId,
-    range: `${SHEET_NAME}!A${insertRow}:K${insertRow}`,
+    range: `${SHEET_NAME}!A${insertRow}:L${insertRow}`,
     valueInputOption: 'USER_ENTERED',
     requestBody: { values: [rowValues] },
   });
@@ -226,6 +248,7 @@ async function appendArticle(sheets, spreadsheetId, body) {
     inserted_at_row: insertRow,
     row_number: nextNum,
     title: body.title,
+    webflow_id: body.webflow_id || '',
   };
 }
 
@@ -236,13 +259,15 @@ async function listTitles(sheets, spreadsheetId) {
     return { ok: true, action: 'list_titles', count: 0, rows: [] };
   }
 
-  // Pull A2:K<lastDataRow> in one call (11 columns: A-K).
+  // Pull A2:L<lastDataRow> in one call (12 columns: A-L).
   // Column K is "Carousel" — tracks whether a carousel has been built
   // for that article. Cycle: every 3rd article in the May 10+ window
   // gets a carousel built in addition to the Reels.
+  // Column L is "Webflow ID" — the durable unique key for matching
+  // articles between the tracker, Webflow CMS, and Asana custom fields.
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId,
-    range: `${SHEET_NAME}!A2:K${lastDataRow}`,
+    range: `${SHEET_NAME}!A2:L${lastDataRow}`,
   });
   const values = res.data.values || [];
   const rows = values.map((r, i) => ({
@@ -252,6 +277,7 @@ async function listTitles(sheets, spreadsheetId) {
     date: r[2] || '',
     in_asana: r[9] || '', // column J
     carousel: r[10] || '', // column K
+    webflow_id: r[11] || '', // column L
   })).filter((r) => r.title); // drop rows with empty title (shouldn't normally happen)
 
   return {
@@ -356,6 +382,118 @@ async function flipInAsana(sheets, spreadsheetId, body) {
   return { ok: false, error: 'title not found: ' + body.title };
 }
 
+async function setWebflowId(sheets, spreadsheetId, body) {
+  // Two modes:
+  //   { title, webflow_id }  → find by normalized title
+  //   { row,   webflow_id }  → write directly to that row
+  // Either way the value lands in column L.
+  if (body.webflow_id === undefined || body.webflow_id === null) {
+    return { ok: false, error: 'webflow_id is required' };
+  }
+  const newValue = String(body.webflow_id);
+
+  // Direct-row mode
+  if (body.row !== undefined && body.row !== null && body.row !== '') {
+    const row = Number(body.row);
+    if (!row || row < 2) {
+      return { ok: false, error: 'row must be a number >= 2 (row 1 is the header)' };
+    }
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `${SHEET_NAME}!L${row}`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: { values: [[newValue]] },
+    });
+    return { ok: true, action: 'set_webflow_id', row, webflow_id: newValue };
+  }
+
+  // Title-lookup mode
+  if (!body.title) {
+    return { ok: false, error: 'either title or row is required' };
+  }
+  const insertRow = await findInsertRow(sheets, spreadsheetId);
+  const lastDataRow = insertRow - 1;
+  if (lastDataRow < 2) {
+    return { ok: false, error: 'no article rows found in tracker' };
+  }
+  const bRes = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `${SHEET_NAME}!B2:B${lastDataRow}`,
+  });
+  const target = normalizeTitle(body.title);
+  const values = bRes.data.values || [];
+  for (let i = 0; i < values.length; i++) {
+    if (normalizeTitle((values[i] || [])[0] || '') === target) {
+      const row = i + 2;
+      await sheets.spreadsheets.values.update({
+        spreadsheetId,
+        range: `${SHEET_NAME}!L${row}`,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: { values: [[newValue]] },
+      });
+      return { ok: true, action: 'set_webflow_id', row, webflow_id: newValue, title: body.title };
+    }
+  }
+  return { ok: false, error: 'title not found: ' + body.title };
+}
+
+async function initColumns(sheets, spreadsheetId) {
+  // One-shot init: writes the "Webflow ID" header into L1 if absent.
+  // Idempotent — refuses to overwrite a non-empty L1.
+  const cur = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `${SHEET_NAME}!L1`,
+  });
+  const existing = String(((cur.data.values || [])[0] || [])[0] || '').trim();
+  if (existing === 'Webflow ID') {
+    return { ok: true, action: 'init_columns', skipped: true, message: 'L1 already set' };
+  }
+  if (existing) {
+    return { ok: false, error: `L1 is non-empty ("${existing}") — refusing to overwrite` };
+  }
+  await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range: `${SHEET_NAME}!L1`,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: { values: [['Webflow ID']] },
+  });
+  return { ok: true, action: 'init_columns', written: 'L1=Webflow ID' };
+}
+
+async function lookupByWebflowId(sheets, spreadsheetId, body) {
+  if (!body.webflow_id) {
+    return { ok: false, error: 'webflow_id is required' };
+  }
+  const target = String(body.webflow_id).trim();
+  const insertRow = await findInsertRow(sheets, spreadsheetId);
+  const lastDataRow = insertRow - 1;
+  if (lastDataRow < 2) {
+    return { ok: false, error: 'not found' };
+  }
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId,
+    range: `${SHEET_NAME}!A2:L${lastDataRow}`,
+  });
+  const values = res.data.values || [];
+  for (let i = 0; i < values.length; i++) {
+    const r = values[i] || [];
+    if (String(r[11] || '').trim() === target) {
+      return {
+        ok: true,
+        action: 'lookup_by_webflow_id',
+        row: i + 2,
+        num: r[0] || '',
+        title: r[1] || '',
+        date: r[2] || '',
+        in_asana: r[9] || '',
+        carousel: r[10] || '',
+        webflow_id: r[11] || '',
+      };
+    }
+  }
+  return { ok: false, error: 'not found' };
+}
+
 module.exports = async function handler(req, res) {
   // CORS / preflight — harmless to allow
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -385,7 +523,7 @@ module.exports = async function handler(req, res) {
     }
     providedSecret = url.searchParams.get('secret') || '';
     body.action = action;
-    for (const k of ['title', 'date', 'row', 'value']) {
+    for (const k of ['title', 'date', 'row', 'value', 'webflow_id']) {
       if (url.searchParams.has(k)) body[k] = url.searchParams.get(k);
     }
     if (body.row !== undefined) body.row = Number(body.row);
@@ -433,6 +571,18 @@ module.exports = async function handler(req, res) {
       }
       case 'list_titles': {
         const result = await listTitles(sheets, spreadsheetId);
+        return res.status(result.ok ? 200 : 400).json(result);
+      }
+      case 'set_webflow_id': {
+        const result = await setWebflowId(sheets, spreadsheetId, body);
+        return res.status(result.ok ? 200 : 400).json(result);
+      }
+      case 'lookup_by_webflow_id': {
+        const result = await lookupByWebflowId(sheets, spreadsheetId, body);
+        return res.status(result.ok ? 200 : 404).json(result);
+      }
+      case 'init_columns': {
+        const result = await initColumns(sheets, spreadsheetId);
         return res.status(result.ok ? 200 : 400).json(result);
       }
       default:

@@ -10,3 +10,4 @@ node_modules/
 # Never commit service-account credentials
 *service-account*.json
 service-account-key.json
+.env*.local

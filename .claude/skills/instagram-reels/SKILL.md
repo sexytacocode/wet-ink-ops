@@ -53,6 +53,7 @@ After committing each design, move it to the shared team folder `FAHHtY3V36U`.
 - **"Published" section:** `1214265072303679`
 - **Natasha (assignee):** `1213652591985519`
 - **Holly Randall (collaborator):** `1212147273860299`
+- **ArticleID custom field:** `1215162242710046` (text custom field on the Wet Ink Social Media project). Holds the Webflow CMS item id for the article. Set on every task this skill creates so the parent pipeline can match tasks to articles by a durable unique key. The caller (content-pipeline) supplies `webflow_id`; if this skill is invoked standalone without one, ask the user for the article's Webflow ID or skip the custom field with a logged warning.
 ---
  
 ## SFW vs UNCENSORED
@@ -328,19 +329,23 @@ tasks: [
     notes: "Edit text and images as needed.\n\nCanva link: https://www.canva.com/design/[design_id]/edit\n\nArticle: [article title]\nVersion: Long Uncensored (5 scenes)",
     assignee: "1213652591985519",
     section_id: "1214264977347926",
-    followers: "me,1212147273860299"
+    followers: "me,1212147273860299",
+    custom_fields: '{"1215162242710046":"<webflow_id>"}'
   },
   {
     name: "[Article Title] — Long SFW Reel",
     notes: "Edit text and images as needed.\n\nCanva link: https://www.canva.com/design/[design_id]/edit\n\nArticle: [article title]\nVersion: Long SFW (5 scenes)",
     assignee: "1213652591985519",
     section_id: "1214264977347926",
-    followers: "me,1212147273860299"
+    followers: "me,1212147273860299",
+    custom_fields: '{"1215162242710046":"<webflow_id>"}'
   }
 ]
 ```
  
 **Important:** Include the Canva edit link in each task description so Natasha can go straight to it. Add the user (Andrew) and Holly Randall as followers on each task using `followers: "me,1212147273860299"`.
+
+**ArticleID custom field:** Both task objects MUST set `custom_fields: '{"1215162242710046":"<webflow_id>"}'`. `webflow_id` is the Webflow CMS item id for this article — the durable unique key the content-pipeline matches tasks against. The parent pipeline passes `webflow_id` in when invoking this skill. If invoked standalone with no `webflow_id` available, either (a) ask the user for the article's Webflow ID, or (b) omit the `custom_fields` entry entirely and log a warning that the task will be invisible to the pipeline's ArticleID-based search. Do NOT make up a value.
  
 ### Step 10: Update the Tracker
  

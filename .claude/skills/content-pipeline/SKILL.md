@@ -40,10 +40,13 @@ Only IDs unique to THIS skill live in the "Required IDs" section below.
 
 ## OVERVIEW
 
-This skill runs in five phases:
+This skill runs in six phases:
 
 **Phase 1 — Detect & log (cheap, ~25-40K tokens)**
-Scrape wetinkmag.com/all-posts, diff against the tracker sheet, append new rows via the webhook.
+Scrape wetinkmag.com/all-posts, resolve the Webflow CMS item id for each parsed article, diff against the tracker sheet, append new rows (with `webflow_id`) via the webhook.
+
+**Phase 0.5 — Self-heal audit (cheap, ~5-10K tokens)**
+For every `In Asana=Y` row from May-10-2026 onward, verify Asana actually has the expected 2 (or 3 with carousel) tasks matched by ArticleID custom field. If a row is short, re-create the missing tasks. Catches the "tracker says Y but Asana is empty" failure mode.
 
 **Phase 1.5 — Preflight check (cheap, ~5K tokens)**
 Pick the **target article** for this run — defined as the tracker row with the most recent `Published Date` where `In Asana` is `N`, blank, or `—`. (Today's newly-scraped articles naturally fall into this set because `append` writes `In Asana=N`; backlog articles from prior runs that never built do too.) Then check Asana + the tracker's `In Asana` column to see whether the reel was already created via an ad-hoc run. Branches the pipeline:
@@ -83,9 +86,10 @@ Create one Asana task per Reel with platform captions embedded in the descriptio
 The "Article Coverage" tab contains three logical tables (the second is a separate tab in newer versions of the sheet):
 
 1. **Article Coverage table** (rows 1..N) — the one we read & append to.
-   11 columns (A–K): `# | Article Title | Published Date | Posted on IG? | Post Type | IG Post Date | IG Link | Create Post? | New Post Type | In Asana | Carousel`.
+   12 columns (A–L): `# | Article Title | Published Date | Posted on IG? | Post Type | IG Post Date | IG Link | Create Post? | New Post Type | In Asana | Carousel | Webflow ID`.
    - **Column J `In Asana`** — Y once the Reel Asana tasks have been created.
    - **Column K `Carousel`** — Y once a Carousel has been built for this article. The pipeline auto-builds carousels on a 3-article cycle (see Phase 1.5 Step 5.5b).
+   - **Column L `Webflow ID`** — the Webflow CMS item id for this article. This is the **durable unique key** threaded through the pipeline (titles are fragile: curly quotes, Webflow edits, partial matches). Populated by Phase 1 on insert and copied to the Asana `ArticleID` custom field on each task. Used as the matching key in Phase 1.5 preflight, Phase 4 verify, and Phase 0.5 self-heal.
 
 2. **Instagram Posts performance table** (rows N+1..M) — read-only for this skill; populated by other tooling.
    Columns: `# | Date Posted | Post Type | Caption | Likes | Comments | Reach | Shares | Saved | Engagement | Link`.
@@ -110,13 +114,16 @@ The Vercel-hosted webhook (`api/webhook.js` in this repo) handles all sheet writ
 | Action | Body | Returns |
 |---|---|---|
 | `ping` | `{"action":"ping"}` | `{ok:true, message:"pong"}` |
-| `append` | `{"action":"append", "title":"...", "date":"Month DD, YYYY"}` | `{ok:true, inserted_at_row, row_number, title}` — or `{ok:true, skipped:true, existing_row}` if the title is already in the tracker (idempotent) |
-| `list_titles` | `{"action":"list_titles"}` | `{ok:true, count:N, rows:[{row, num, title, date, in_asana, carousel}, ...]}` — every row in the Article Coverage table |
+| `append` | `{"action":"append", "title":"...", "date":"Month DD, YYYY", "webflow_id":"<cms item id>"}` | `{ok:true, inserted_at_row, row_number, title, webflow_id}` — or `{ok:true, skipped:true, existing_row}` if the title is already in the tracker (idempotent). `webflow_id` is optional but the pipeline should always supply it. |
+| `list_titles` | `{"action":"list_titles"}` | `{ok:true, count:N, rows:[{row, num, title, date, in_asana, carousel, webflow_id}, ...]}` — every row in the Article Coverage table |
 | `flip_in_asana` | `{"action":"flip_in_asana", "title":"...", "value":"Y"|"N"}` | `{ok:true, row, value, title}` — sets column J (`In Asana`). Default value is `Y`. |
 | `flip_carousel` | `{"action":"flip_carousel", "title":"...", "value":"Y"|"N"}` | `{ok:true, row, value, title}` — sets column K (`Carousel`). Default value is `Y`. |
+| `set_webflow_id` | `{"action":"set_webflow_id", "title":"...", "webflow_id":"<id>"}` OR `{"action":"set_webflow_id", "row":N, "webflow_id":"<id>"}` | `{ok:true, row, webflow_id}` — writes column L. Used by the backfill to populate the Webflow ID for rows that predate the column. |
+| `lookup_by_webflow_id` | `{"action":"lookup_by_webflow_id", "webflow_id":"<id>"}` | `{ok:true, row, num, title, date, in_asana, carousel, webflow_id}` — returns the matching row, or 404 `{ok:false, error:"not found"}`. |
+| `init_columns` | `{"action":"init_columns"}` | `{ok:true, written:"L1=Webflow ID"}` or `{ok:true, skipped:true}` if L1 already says `Webflow ID`. One-shot init of the column header — already run, listed here for documentation. |
 | `delete_row` | `{"action":"delete_row", "row":N}` | `{ok:true, deleted_row:N}` — one-off cleanup; shifts all rows below up by 1 |
 
-The `append` action auto-computes `#` (max existing + 1), fills the 11 default columns (`Posted on IG?`=N, `Create Post?`=Y, `New Post Type`=Reel, `In Asana`=N, `Carousel`=N), and inherits formatting from the article row above (cell colors, dropdowns, conditional formatting).
+The `append` action auto-computes `#` (max existing + 1), fills the 12 default columns (`Posted on IG?`=N, `Create Post?`=Y, `New Post Type`=Reel, `In Asana`=N, `Carousel`=N, `Webflow ID`=passed value or empty), and inherits formatting from the article row above (cell colors, dropdowns, conditional formatting).
 
 ---
 
@@ -139,13 +146,13 @@ The page lists ~25-30 articles per page in reverse chronological order. Each art
 
 **URL pattern is `/posts/<slug>` (with the `s`).** A previous version of this skill used `/post/` — that's wrong.
 
-Parse out: title, category, publish date, full URL. Pattern that works:
+Parse out: title, category, publish date, slug, full URL. Pattern that works:
 
 ```python
 import re, html as htmllib
 pat = re.compile(r'<a [^>]*href="(/posts/[^"]+)"[^>]*>(.*?)</a>', re.DOTALL)
 for href, inner in pat.findall(page):
-    slug = href.rsplit('/', 1)[-1]
+    slug = href.rsplit('/', 1)[-1]                # KEEP — used to resolve webflow_id below
     title_m = re.search(r'<h2[^>]*>(.*?)</h2>', inner, re.DOTALL)
     title = htmllib.unescape(re.sub(r'<[^>]+>', '', title_m.group(1))).strip() if title_m else ''
     date_m = re.search(r'\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+\d{1,2},?\s+\d{4}\b', inner)
@@ -155,9 +162,31 @@ for href, inner in pat.findall(page):
     # ...
 ```
 
-Dedupe by slug (the page sometimes renders both a tile and a featured-card link to the same article).
+Dedupe by slug (the page sometimes renders both a tile and a featured-card link to the same article). **Keep the slug per article** — Step 1.5 below uses it to resolve the Webflow CMS item id, which we thread through as the durable unique key.
 
 **Page 1 is sufficient for daily runs** — new articles always appear at the top. Only fetch page 2 if doing initial sheet setup.
+
+### Step 1.5: Resolve Webflow CMS item id for each parsed article
+
+Once Step 1 has the list of articles, look up the Webflow CMS item id for each. The id is the durable unique key the pipeline threads through:
+
+- tracker column L (`Webflow ID`)
+- Asana `ArticleID` custom field (GID `1215162242710046`) on every task this pipeline creates
+- Phase 1.5 preflight matches Asana tasks by ArticleID, not by name
+- Phase 4 verify and Phase 0.5 self-heal match by ArticleID
+
+Load the Webflow MCP `data_cms_tool` via `tool_search` if not already loaded. The Wet Ink site exposes a "Posts" collection. For each parsed article, query items by slug:
+
+```
+data_cms_tool
+  action: "list_collection_items"   # or whatever the MCP exposes for filtered list
+  collection: "Posts"               # or its collection id, look up once and cache
+  filter: { slug: <article.slug> }  # exact match on the slug
+```
+
+Take `item.id` from the response → that's the `webflow_id`. Save it on the article record alongside `title`, `date`, `category`, `slug`, `url`.
+
+If `data_cms_tool` lookup fails (collection not found, slug not matched, MCP down): log a warning and proceed with `webflow_id=""`. The webhook accepts empty webflow_id and the row will just be missing column L (backfill can fix it later). Do NOT fail the pipeline over a webflow_id lookup miss — Phase 1.5 preflight gracefully falls back to title matching when an article has no webflow_id.
 
 ### Step 2: Read the tracker via webhook
 
@@ -194,11 +223,12 @@ curl -X POST "https://wet-ink-ops.vercel.app/api/webhook" \
   -d '{
     "action": "append",
     "title": "<article title verbatim from scrape>",
-    "date":  "<Published Date, e.g. \"May 12, 2026\">"
+    "date":  "<Published Date, e.g. \"May 12, 2026\">",
+    "webflow_id": "<Webflow CMS item id from Step 1.5; omit or empty string if lookup failed>"
   }'
 ```
 
-The webhook handles everything: auto-computes the next `#`, fills the 10 default columns, and inherits formatting from the article row above. See "Webhook API" above for the full contract.
+The webhook handles everything: auto-computes the next `#`, fills the 12 default columns (including column L `Webflow ID`), and inherits formatting from the article row above. See "Webhook API" above for the full contract.
 
 **Idempotency:** The webhook is idempotent on `title`. A duplicate POST returns `{ok:true, skipped:true, existing_row:N}` rather than inserting a duplicate. This guards against retries (Vercel function retries on cold start) and pipeline reruns.
 
@@ -214,6 +244,41 @@ Tell the user:
 - Whether Phase 1.5 will proceed (yes if newly-appended count + backlog count > 0)
 
 If newly-appended count + backlog count == 0: "All tracker rows are in Asana. Nothing to process." Exit the pipeline.
+
+---
+
+## PHASE 0.5: SELF-HEAL AUDIT (POST-PHASE-1)
+
+Runs immediately after Phase 1 completes (before Phase 1.5 picks a target). Catches the "Canva designs built, tracker flipped to `In Asana=Y`, but Asana tasks weren't actually created" failure mode that motivated the ArticleID migration. Cheap — a single Asana `search_tasks` per affected row.
+
+**Scope:** every tracker row where `in_asana == "Y"` AND `Published Date >= 2026-05-10`. Roughly the May-10-onwards window (the same window Phase 1.5 uses for target selection). Pre-May-10 rows are out-of-scope.
+
+For each in-scope row:
+
+1. Skip rows with empty `webflow_id` (we have nothing to look up by). Log them as "skipped — no webflow_id" for the final report.
+2. Search Asana by ArticleID custom field:
+   ```
+   mcp__asana__search_tasks
+     workspace: "<wet ink workspace gid>"
+     projects.any: "1214264767251100"
+     custom_fields: '{"1215162242710046.contains":"<row.webflow_id>"}'
+     fields: ["gid", "name", "permalink_url"]
+   ```
+   **Important: the `.contains` suffix is required for text custom fields in the Asana search filter.** A plain `"1215162242710046": "..."` filter returns a 400 `Not a valid search parameter`. Use `.contains` for exact-string matching on text fields (the ID strings are stable and there's no overlap risk).
+3. Expected count:
+   - **3** if `row.carousel == "Y"` (Uncensored Reel + SFW Reel + SFW Carousel)
+   - **2** otherwise (Uncensored Reel + SFW Reel only)
+4. If actual count == expected → row is healthy, skip.
+5. If actual count < expected → row is **short**:
+   - Look up the article's existing Canva designs by searching the Wet Ink Reels folder (`FAHHtY3V36U`) and the carousel folder (see `instagram-carousel` SKILL.md for its folder id) for design titles starting with the article title.
+   - Spawn the **caption subagent** (Phase 2 Step 7 caption prompt) to regenerate captions from the article URL.
+   - For each missing task type (Uncensored Reel, SFW Reel, or Carousel), call `Asana:create_tasks` with the same parameters Phase 4 Step 10 uses — and crucially, set `custom_fields: '{"1215162242710046":"<row.webflow_id>"}'`.
+   - Verify with the same logic Phase 4 Step 10.5 uses. If still short after re-create, save a FAIL note and surface it in the final report (do not retry — manual intervention required).
+6. If actual count > expected → log as "over-built; manual review" and skip. (Likely a duplicate from a previous ad-hoc run; don't auto-delete.)
+
+If no rows need healing, Phase 0.5 is a no-op. Report the count anyway so the user knows the audit ran.
+
+**Why now and not later:** running this BEFORE Phase 1.5 means the self-heal catches stale rows on the same pipeline tick that would otherwise process today's new article — no waiting for a future run, no half-broken state lingering.
 
 ---
 
@@ -272,27 +337,44 @@ After completing Phase 4 Step 12 (or Phase 4 Step 11 if Asana already had the ar
 
 Each iteration is independent — Phase 1 is NOT re-run within the loop (already done for this run). Just Phase 1.5 → 2 → 3 → 4, with a fresh target article selection at the start of each iteration.
 
-### Step 5.5c: Search Asana
+### Step 5.5c: Search Asana by ArticleID custom field
 
-Load Asana MCP via `tool_search` query `"asana search tasks"`, then search the Wet Ink Social Media project for any task whose name contains the article title:
+Load Asana MCP via `tool_search` query `"asana search tasks"`, then search the Wet Ink Social Media project by the **ArticleID custom field** (GID `1215162242710046`) equal to the target row's `webflow_id`:
 
 ```
-mcp__asana__search_tasks_preview:
+mcp__asana__search_tasks:
   workspace: "<wet ink workspace gid>"
   projects.any: "1214264767251100"   # Wet Ink Social Media project
-  text: "<article title>"
+  custom_fields: '{"1215162242710046.contains":"<target.webflow_id>"}'
+  fields: ["gid", "name", "permalink_url"]
 ```
 
 (The Wet Ink Social Media project ID and other operational IDs live in `instagram-reels` SKILL.md "Required Asana IDs" section — do not restate them here.)
 
-Match logic: a task is a hit if its name, after the same normalization the webhook uses, contains the article title. Normalization:
+**Why custom-field search and not title search:** titles are fragile. Webflow edits, curly-quote drift, and partial-substring false positives caused the original failure mode this whole change was designed to fix. The ArticleID custom field is the durable unique key.
+
+**Match interpretation:**
+- **2 matches** (or 3 if the article has a carousel) → **Asana has it** (full set). Treat as "skipped-built-already" and route to Phase 4 Step 11.
+- **1 match** → **half-built**. The pipeline crashed mid-Phase-4 in a previous run. Treat as "needs build" so Phase 2-4 fires and the verify step (Phase 4 Step 10.5) creates the missing task(s). Phase 4 Step 10 task creation should idempotently skip the already-existing ones (search again right before each create).
+- **0 matches** → **needs build** (normal path).
+
+**Fallback when `target.webflow_id` is empty** (e.g., older row from before the column existed, or Step 1.5 lookup failed): fall back to the original name-based search:
+
+```
+mcp__asana__search_tasks_preview:
+  workspace: "<wet ink workspace gid>"
+  projects.any: "1214264767251100"
+  text: "<article title>"
+```
+
+Match logic for the fallback: a task is a hit if its name, after the same normalization the webhook uses, contains the article title. Normalization:
 - lowercase, trim
 - `‘’` → `'`, `“”` → `"`
 - `—–` → `-`
 - strip trailing `?!.,`
 - collapse whitespace
 
-The Wet Ink Reels pattern is two tasks per article: `<Article Title> — Long Uncensored Reel` and `<Article Title> — Long SFW Reel`. Either matching counts as "Asana has it."
+The Wet Ink Reels pattern is two tasks per article: `<Article Title> — Long Uncensored Reel` and `<Article Title> — Long SFW Reel`. Either matching counts as "Asana has it" in the fallback path.
 
 ### Step 5.5d: Check the tracker In Asana column
 
@@ -489,6 +571,10 @@ Wait for the reviewer's report. Do not proceed to Phase 4 until it returns.
 
 Defer to `instagram-reels` SKILL.md Step 9 for task structure (assignee, section, follower IDs, project ID). DO NOT restate those IDs here. Carousel tasks reuse the same Asana project, section, and assignee.
 
+**Every task MUST set the ArticleID custom field.** This is the durable unique key the rest of the pipeline (preflight, self-heal, verify) matches on. Add `custom_fields: {"1215162242710046": "<target.webflow_id>"}` to every task object in the `create_tasks` call. (Note: on **create/update**, the custom_fields map uses the plain GID as the key — `.contains` is a SEARCH filter qualifier and does NOT apply to writes. The `update_tasks` MCP also accepts a nested object directly rather than a JSON string.)
+
+If `target.webflow_id` is empty for this article (older row that wasn't backfilled, or Step 1.5 lookup failed): create the tasks without the custom field but log a WARNING in the final report — the article will be invisible to Phase 0.5 self-heal and Phase 1.5 preflight ArticleID search, falling back to title-based matching only.
+
 Create:
 - **Two Reel tasks** — Uncensored + SFW. Per the existing template below.
 - **One Carousel task** — ONLY if `needs_carousel == true` from Step 5.5b. Single SFW carousel; no Uncensored version.
@@ -536,6 +622,32 @@ Suggested Instagram caption:
 Hashtags:
 {instagram_hashtags joined with spaces}
 ```
+
+### Step 10.5: Verify Asana tasks by ArticleID
+
+After `create_tasks` returns, re-query Asana to confirm the tasks actually landed AND have the ArticleID custom field set. This catches the failure mode that motivated this whole change: `create_tasks` returning "success" but tasks not appearing, or appearing without the custom field.
+
+```
+mcp__asana__search_tasks
+  workspace: "<wet ink workspace gid>"
+  projects.any: "1214264767251100"
+  custom_fields: '{"1215162242710046.contains":"<target.webflow_id>"}'
+  fields: ["gid", "name", "permalink_url"]
+```
+
+**Expected count:**
+- N = **2** for Reel-only builds (Uncensored + SFW)
+- N = **3** for Reel + Carousel builds (Uncensored + SFW + Carousel)
+
+**If actual count != expected:** save a FAIL report to `/Users/andrewnagle/Claude/Wet Ink Organic Social Posts/content-pipeline-<YYYY-MM-DD>-VERIFY-FAIL.md` with:
+- target article (title, webflow_id, URL)
+- expected count, actual count
+- list of returned task gids + names
+- the `create_tasks` response
+
+**DO NOT flip the tracker** (`In Asana=Y`) on verify FAIL. The tracker stays `N` so the next pipeline run / self-heal phase can retry. Surface the failure prominently in the final report so the user can intervene.
+
+If `target.webflow_id` is empty (couldn't be set in Step 10), skip the verify step but log a NOTICE in the final report explaining why verification was skipped.
 
 ### Step 11: Flip tracker flags via the webhook
 
@@ -606,6 +718,9 @@ Only IDs that don't belong to a downstream skill:
 
 - **Wet Ink site URL:** `https://wetinkmag.com/all-posts`
 - **Tracker sheet ID:** `1sPQwj2ZSu9A7drg2YuUwQrcwVQ7JQNcbM7qRbQhMhaA`
+- **Webflow Posts collection:** look up once via `data_cms_tool` `list_collections` (cached if the lookup is repeated within a run)
+- **Asana `ArticleID` custom field GID:** `1215162242710046` (text custom field on the Wet Ink Social Media project `1214264767251100`). Holds the Webflow CMS item id. THE durable unique key the pipeline matches on — never use title-substring matching when this is available.
+- **Asana `ArticleID` custom_field_settings GID** (only needed for admin/setup, not for normal pipeline operation): `1215162242710047`
 - **Backup report directory:** `/Users/andrewnagle/Claude/Wet Ink Organic Social Posts/`
 
 All Canva template/folder/brand-kit IDs and all Asana project/section/assignee/collaborator IDs are read from `instagram-reels` SKILL.md. If you find yourself about to type a Canva or Asana ID into this skill, stop — it belongs in the downstream skill instead.

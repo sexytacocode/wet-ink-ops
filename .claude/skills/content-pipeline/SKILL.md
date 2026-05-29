@@ -38,6 +38,22 @@ Only IDs unique to THIS skill live in the "Required IDs" section below.
 
 ---
 
+## ⛔ CRITICAL — IDEMPOTENCY RULE (READ BEFORE EVERY PHASE)
+
+**You MUST NEVER call `create_tasks` for a task name+ArticleID that already exists in Asana.** Duplicate tasks are a FAIL state. This rule applies in Phase 0.5 (self-heal), Phase 1.5 (preflight partial-built branch), and Phase 4 Step 10 (normal build).
+
+Before EVERY `create_tasks` call, do this 3-step pre-check:
+
+1. Search Asana: `search_tasks` with `projects.any: "1214264767251100"` and `custom_fields: '{"1215162242710046.contains":"<webflow_id>"}'`. Get back the list of existing tasks for this article.
+2. Build `existing_names = {task.name for task in results}`. Compute `planned_names` (your intended task names). Compute `tasks_to_create = planned_names - existing_names`.
+3. If `tasks_to_create` is empty → skip the entire `create_tasks` call. If non-empty → call `create_tasks` ONLY with the tasks in `tasks_to_create`, never with the full planned set.
+
+There are no exceptions. If the SKILL says "create the Reel + SFW + Carousel tasks" but the SFW task already exists, you only create Reel + Carousel. This rule overrides any per-phase wording elsewhere in the SKILL.
+
+**Why this rule is here at the top:** the pipeline has previously created 18 duplicate tasks across three fires because per-phase wording was ambiguous about "for each missing task type." When in doubt, search before creating. The search is cheap; the duplicate cleanup is not.
+
+---
+
 ## OVERVIEW
 
 This skill runs in six phases:
@@ -269,11 +285,22 @@ For each in-scope row:
    - **3** if `row.carousel == "Y"` (Uncensored Reel + SFW Reel + SFW Carousel)
    - **2** otherwise (Uncensored Reel + SFW Reel only)
 4. If actual count == expected → row is healthy, skip.
-5. If actual count < expected → row is **short**:
-   - Look up the article's existing Canva designs by searching the Wet Ink Reels folder (`FAHHtY3V36U`) and the carousel folder (see `instagram-carousel` SKILL.md for its folder id) for design titles starting with the article title.
-   - Spawn the **caption subagent** (Phase 2 Step 7 caption prompt) to regenerate captions from the article URL.
-   - For each missing task type (Uncensored Reel, SFW Reel, or Carousel), call `Asana:create_tasks` with the same parameters Phase 4 Step 10 uses — and crucially, set `custom_fields: '{"1215162242710046":"<row.webflow_id>"}'`.
-   - Verify with the same logic Phase 4 Step 10.5 uses. If still short after re-create, save a FAIL note and surface it in the final report (do not retry — manual intervention required).
+5. If actual count < expected → row is **short**. STOP AND THINK before creating anything:
+
+   **5a. Determine which exact task names are missing.** Inspect the names returned by step 2's search. The three canonical task names for a fully-built article are:
+   - `<title> — Long Uncensored Reel`
+   - `<title> — Long SFW Reel`
+   - `<title> — Instagram Carousel`
+
+   Build `existing_names = set of returned task names`. Build `expected_names = set of canonical names based on row.carousel` (3 names if K=Y, 2 names if K=N — the first two only, never retroactively add carousel for K=N rows). Then `missing_names = expected_names - existing_names`. **Only create tasks whose names are in `missing_names`.** Never create a task whose name (or normalized variant) is already in `existing_names`.
+
+   **5b. Idempotency double-check.** Right before each `create_tasks` call, re-search Asana for the exact task name you're about to create (use `search_tasks_preview` with `text="<exact task name>"` AND the ArticleID custom field filter). If even one match comes back, SKIP that create — it already exists. This guards against race conditions and your own state drift.
+
+   **5c. Carousel rule — strict.** If `row.carousel == "N"`, do NOT create a Carousel task in Phase 0.5 even if "every article gets a carousel" is the new default. Phase 0.5 only fills GAPS in what the row historically should have; it does not retroactively add new task types. Cycle-era K=N rows stay at 2 tasks forever unless the user explicitly asks for a carousel build.
+
+   **5d. Execute creates.** Look up the article's existing Canva designs by searching the Wet Ink Reels folder (`FAHHtY3V36U`) and the carousel folder (see `instagram-carousel` SKILL.md for its folder id) for design titles starting with the article title. Spawn the **caption subagent** (Phase 2 Step 7 caption prompt) to regenerate captions from the article URL. For each name in `missing_names`, call `Asana:create_tasks` with the Phase 4 Step 10 parameters AND `custom_fields: '{"1215162242710046":"<row.webflow_id>"}'`.
+
+   **5e. Verify.** Re-search by ArticleID. If new count != expected count, save a FAIL note. **Do not retry creates** — log and move on. Manual cleanup required.
 6. If actual count > expected → log as "over-built; manual review" and skip. (Likely a duplicate from a previous ad-hoc run; don't auto-delete.)
 
 If no rows need healing, Phase 0.5 is a no-op. Report the count anyway so the user knows the audit ran.
@@ -559,7 +586,7 @@ Wait for the reviewer's report. Do not proceed to Phase 4 until it returns.
 
 ## PHASE 4: COMMIT (PASS BRANCH ONLY)
 
-### Step 10: Create Asana tasks
+### Step 10: Create Asana tasks (with mandatory pre-create idempotency check)
 
 Defer to `instagram-reels` SKILL.md Step 9 for task structure (assignee, section, follower IDs, project ID). DO NOT restate those IDs here. Carousel tasks reuse the same Asana project, section, and assignee.
 
@@ -567,9 +594,24 @@ Defer to `instagram-reels` SKILL.md Step 9 for task structure (assignee, section
 
 If `target.webflow_id` is empty for this article (older row that wasn't backfilled, or Step 1.5 lookup failed): create the tasks without the custom field but log a WARNING in the final report — the article will be invisible to Phase 0.5 self-heal and Phase 1.5 preflight ArticleID search, falling back to title-based matching only.
 
-Create:
+**Step 10a — Idempotency pre-check (MANDATORY).** Before calling `create_tasks`, search Asana by ArticleID to see what tasks already exist for this article:
+
+```
+mcp__asana__search_tasks
+  projects.any: "1214264767251100"
+  custom_fields: '{"1215162242710046.contains":"<target.webflow_id>"}'
+  fields: ["gid", "name"]
+```
+
+Build `existing_names = set of returned task names`. Compute `planned_names = {"<title> — Long Uncensored Reel", "<title> — Long SFW Reel", "<title> — Instagram Carousel"}`. Compute `tasks_to_create = planned_names - existing_names`. **Only pass tasks in `tasks_to_create` to `create_tasks`.** Skip the entire `create_tasks` call if `tasks_to_create` is empty.
+
+This pre-check catches: (a) Phase 1.5 routed to "partial-built" path so some tasks exist; (b) a previous run crashed mid-Step-10; (c) any retry scenario. Never create a duplicate.
+
+**Step 10b — Create:**
 - **Two Reel tasks** — Uncensored + SFW. Per the existing template below.
 - **One Carousel task** — always (every article gets a carousel). Single SFW carousel; no Uncensored version.
+
+Only include tasks whose names are in `tasks_to_create`.
 
 Augment each Reel task's `notes` field with the captions from Phase 2. The Uncensored Reel task carries `twitter_uncensored`; the SFW Reel task carries `twitter_sfw`. Both Reel tasks include the IG caption. The Carousel task includes the IG caption + hashtags only (no X/Twitter copy — carousel posts go to IG, not X).
 

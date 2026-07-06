@@ -40,9 +40,40 @@ After committing each design, move it to the shared team folder `FAHHtY3V36U`.
 ## REQUIRED CANVA IDS
  
 - **Long Reels template (5 scenes):** `DAHILFJfnqU`
-- **Wet Ink brand kit:** `kAG8J_AhIkQ`
+- **Wet Ink brand kit:** `kAHMSfM8ZjU` ("Wet Ink 2")
 - **Shared Reels folder:** `FAHHtY3V36U` ("Wet Ink - Instagram Reels")
 - **Template format:** 1080×1920 (Instagram Reels / 9:16 vertical video)
+---
+ 
+## BRAND KIT — FONTS & COLORS
+ 
+The active brand kit is **Wet Ink 2** (`kAHMSfM8ZjU`). The template `DAHILFJfnqU` is unchanged, but its styling should follow this kit. If you create or restyle any element, match these:
+ 
+**Fonts**
+- **Anton** — display/headline typeface. Use for the cover title and any strong headline moment. Do NOT use Anton for long-form or body copy.
+- **Barlow Condensed** — body, supporting copy, captions, and content-heavy text (hook/insight/closing blocks).
+ 
+**Primary colors**
+| Name | Hex |
+|---|---|
+| Hot pink | `#ff0f7b` |
+| Pink Dark | `#c8005a` |
+| Pink Light | `#ff69b4` |
+| Pink Pale | `#fff0f7` |
+| Black | `#0a0a0a` |
+| White | `#ffffff` |
+| Off White | `#f7f2f5` |
+ 
+**Secondary colors**
+| Name | Hex |
+|---|---|
+| Electric blue | `#0099ff` |
+| Acid green | `#00ff66` |
+| Neon purple | `#9933ff` |
+| Orange | `#ff6600` |
+| Yellow | `#ffe600` |
+ 
+> **Note:** The Canva MCP swaps text/image content but does not re-apply brand fonts or colors — those live on the template. If the template `DAHILFJfnqU` has been refreshed to Wet Ink 2 in Canva, new Reels inherit the new look automatically. Use the values above only when manually styling a new element or flagging a mismatch to the user.
 ---
  
 ## REQUIRED ASANA IDS
@@ -53,7 +84,7 @@ After committing each design, move it to the shared team folder `FAHHtY3V36U`.
 - **"Published" section:** `1214265072303679`
 - **Natasha (assignee):** `1213652591985519`
 - **Holly Randall (collaborator):** `1212147273860299`
-- **ArticleID custom field:** `1215162242710046` (text custom field on the Wet Ink Social Media project). Holds the Webflow CMS item id for the article. Set on every task this skill creates so the parent pipeline can match tasks to articles by a durable unique key. The caller (content-pipeline) supplies `webflow_id`; if this skill is invoked standalone without one, ask the user for the article's Webflow ID or skip the custom field with a logged warning.
+- **ArticleID custom field:** `1215162242710046` (text custom field on the Wet Ink Social Media project). Holds the **WordPress post id** for the article (the field name `webflow_id` is legacy — wetinkmag.com moved off Webflow to WordPress; the value is now a WP post id, e.g. `1305`). Set on every task this skill creates so the parent pipeline can match tasks to articles by a durable unique key. The caller (content-pipeline) supplies `webflow_id` (= the WP post id); if this skill is invoked standalone without one, find it via `https://wetinkmag.com/wp-json/wp/v2/posts?slug=<slug>` (take `id`), ask the user, or skip the custom field with a logged warning.
 ---
  
 ## SFW vs UNCENSORED
@@ -345,7 +376,7 @@ tasks: [
  
 **Important:** Include the Canva edit link in each task description so Natasha can go straight to it. Add the user (Andrew) and Holly Randall as followers on each task using `followers: "me,1212147273860299"`.
 
-**ArticleID custom field:** Both task objects MUST set `custom_fields: '{"1215162242710046":"<webflow_id>"}'`. `webflow_id` is the Webflow CMS item id for this article — the durable unique key the content-pipeline matches tasks against. The parent pipeline passes `webflow_id` in when invoking this skill. If invoked standalone with no `webflow_id` available, either (a) ask the user for the article's Webflow ID, or (b) omit the `custom_fields` entry entirely and log a warning that the task will be invisible to the pipeline's ArticleID-based search. Do NOT make up a value.
+**ArticleID custom field:** Both task objects MUST set `custom_fields: '{"1215162242710046":"<webflow_id>"}'`. `webflow_id` here is the **WordPress post id** for this article (legacy field name — see note above) — the durable unique key the content-pipeline matches tasks against. The parent pipeline passes it in when invoking this skill. If invoked standalone with none available, either (a) resolve it from `https://wetinkmag.com/wp-json/wp/v2/posts?slug=<slug>` (take `id`) or ask the user, or (b) omit the `custom_fields` entry entirely and log a warning that the task will be invisible to the pipeline's ArticleID-based search. Do NOT make up a value.
  
 ### Step 10: Update the Tracker
  

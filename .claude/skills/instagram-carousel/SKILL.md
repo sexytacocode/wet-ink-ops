@@ -49,9 +49,41 @@ For non-explicit articles, SFW is a non-issue — just write naturally in the We
 ## REQUIRED CANVA IDS
 
 - **Carousel template design:** `DAHHrgpO6aE` ("Copy of Carousel How to Regain Momentum and Reconnect with Your Audience")
-- **Wet Ink brand kit:** `kAG8J_AhIkQ`
+- **Wet Ink brand kit:** `kAHMSfM8ZjU` ("Wet Ink 2")
 - **Template structure:** 4 pages at 1080×1350 (Instagram portrait)
 - **Shared carousels folder:** `FAHILIV3D2w` ("Wet Ink - Instagram Carousels")
+
+---
+
+## BRAND KIT — FONTS & COLORS
+
+The active brand kit is **Wet Ink 2** (`kAHMSfM8ZjU`). The template `DAHHrgpO6aE` is unchanged, but its styling should follow this kit. If you create or restyle any element, match these:
+
+**Fonts**
+- **Anton** — display/headline typeface. Use for the cover title (slide 1) and any strong headline moment. Do NOT use Anton for long-form or body copy.
+- **Barlow Condensed** — body, supporting copy, and captions (hook/payoff text on slides 2-3).
+
+**Primary colors**
+| Name | Hex |
+|---|---|
+| Hot pink | `#ff0f7b` |
+| Pink Dark | `#c8005a` |
+| Pink Light | `#ff69b4` |
+| Pink Pale | `#fff0f7` |
+| Black | `#0a0a0a` |
+| White | `#ffffff` |
+| Off White | `#f7f2f5` |
+
+**Secondary colors**
+| Name | Hex |
+|---|---|
+| Electric blue | `#0099ff` |
+| Acid green | `#00ff66` |
+| Neon purple | `#9933ff` |
+| Orange | `#ff6600` |
+| Yellow | `#ffe600` |
+
+> **Note:** The Canva MCP swaps text/image content but does not re-apply brand fonts or colors — those live on the template. If the template `DAHHrgpO6aE` has been refreshed to Wet Ink 2 in Canva, new carousels inherit the new look automatically. Use the values above only when manually styling a new element or flagging a mismatch to the user.
 
 ---
 

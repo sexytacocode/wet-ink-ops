@@ -17,7 +17,7 @@ description: >
 
 ## ⚠️ PRE-FLIGHT CHECKLIST
 
-- [ ] **bash / curl / python3 available** — Used to scrape the all-posts page, parse HTML, and POST to the tracker webhook.
+- [ ] **bash / curl / python3 available** — Used to pull posts from the WordPress REST API, parse JSON, and POST to the tracker webhook.
 - [ ] **Tracker webhook reachable** — Sheet reads AND writes go to `https://wet-ink-ops.vercel.app/api/webhook` (Vercel-hosted serverless function in this same repo, at `api/webhook.js`). Requires the `WEBHOOK_SECRET` env var. For local testing, pull it from Vercel with `vercel env pull .env.local && export $(grep WEBHOOK_SECRET .env.local | xargs)`. The webhook handles all sheet I/O — no Google Drive MCP, no Chrome MCP, no Apps Script. Works headlessly so the daily scheduled routine doesn't need a laptop awake or any Google connector at all.
 - [ ] **Asana MCP loaded** — Used by Phase 1.5 preflight check and Phase 4 task creation. Load via `tool_search` query `"asana"`.
 - [ ] **Subagent: `reel-image-reviewer`** — Defined at `.claude/agents/reel-image-reviewer.md`. Required for the Phase 3 gate. If unavailable (e.g. running in Claude Desktop), see "Desktop fallback" below.
@@ -35,6 +35,26 @@ This skill does NOT restate Canva template IDs, Asana assignee IDs, brand kit ID
 - `wet-ink-voice` SKILL.md — voice rules
 
 Only IDs unique to THIS skill live in the "Required IDs" section below.
+
+---
+
+## 🌐 PLATFORM: WORDPRESS (the site moved off Webflow)
+
+**wetinkmag.com is now a WordPress site** (WordPress.com / Automattic "a8c" hosting). The old Webflow CMS, the `data_cms_tool` MCP, the `/all-posts` HTML scrape, and the `cdn.prod.website-files.com` image CDN are all **gone**. Everything this skill reads about articles now comes from the **public WordPress REST API**:
+
+- **Posts endpoint:** `https://wetinkmag.com/wp-json/wp/v2/posts?_embed=1` — one call returns each post's `id`, `slug`, `link`, `date`, `title.rendered`, `content.rendered`, `featured_media`, and (via `_embed`) the featured-image `source_url` and category/tag terms. This single endpoint replaces both the all-posts scrape AND the per-article CMS lookup the old pipeline did.
+- **Permalinks are unchanged:** still `https://wetinkmag.com/posts/<slug>/` (with the `s`, now with a trailing slash).
+- **Images now live on `https://wetinkmag.com/wp-content/uploads/...`** — never `cdn.prod.website-files.com`.
+- **⚠️ a8c CDN serves stale REST.** Always cache-bust the REST call with a unique query param, e.g. append `&_cb=$(date +%s)` to every `wp-json` URL, or the response may lag the live site by minutes.
+
+### The durable key is now the WordPress post id (legacy field name retained)
+
+The pipeline's durable unique key — threaded through tracker column L, the Asana `ArticleID` custom field, and every preflight/self-heal/verify match — **is now the WordPress post `id`** (an integer like `1305`), NOT a Webflow CMS item id.
+
+**The storage layer keeps the legacy name `webflow_id`** to avoid a production webhook redeploy and a live-sheet migration. So throughout this skill:
+- The webhook field/param `webflow_id`, the actions `set_webflow_id` / `lookup_by_webflow_id`, and tracker **column L "Webflow ID"** all still exist under those literal names — **but the value they hold is the WordPress post id.**
+- When you read `row.webflow_id` or pass `"webflow_id": ...`, you are reading/writing a WP post id. Treat "webflow_id" purely as the opaque key's storage name; its meaning is "WP post id".
+- **Old rows** (built during the Webflow era) keep their now-inert Webflow CMS ids in column L; their Asana `ArticleID` holds the same old id, so they still match each other. **New rows** get WP post ids in both places. Both generations are internally consistent — never try to reconcile a Webflow id against a WP id.
 
 ---
 
@@ -58,14 +78,14 @@ There are no exceptions. If the SKILL says "create the Reel + SFW + Carousel tas
 
 This skill runs in six phases:
 
-**Phase 1 — Detect & log (cheap, ~25-40K tokens)**
-Scrape wetinkmag.com/all-posts, resolve the Webflow CMS item id for each parsed article, diff against the tracker sheet, append new rows (with `webflow_id`) via the webhook.
+**Phase 1 — Detect & log (cheap, ~15-25K tokens)**
+Pull recent posts from the WordPress REST API (`/wp-json/wp/v2/posts?_embed=1`, cache-busted), diff against the tracker sheet by title, append new rows (with the WordPress post id, stored in the `webflow_id` field) via the webhook. The REST response carries the post id directly — no separate CMS lookup step.
 
 **Phase 0.5 — Self-heal audit (cheap, ~5-10K tokens)**
 For every `In Asana=Y` row from May-10-2026 onward, verify Asana actually has the expected 2 (or 3 with carousel) tasks matched by ArticleID custom field. If a row is short, re-create the missing tasks. Catches the "tracker says Y but Asana is empty" failure mode.
 
 **Phase 1.5 — Preflight check (cheap, ~5K tokens)**
-Pick the **target article** for this run — defined as the tracker row with the most recent `Published Date` where `In Asana` is `N`, blank, or `—`. (Today's newly-scraped articles naturally fall into this set because `append` writes `In Asana=N`; backlog articles from prior runs that never built do too.) Then check Asana + the tracker's `In Asana` column to see whether the reel was already created via an ad-hoc run. Branches the pipeline:
+Pick the **target article** for this run — defined as the tracker row with the most recent `Published Date` where `In Asana` is `N`, blank, or `—`. (Today's newly-detected articles naturally fall into this set because `append` writes `In Asana=N`; backlog articles from prior runs that never built do too.) Then check Asana + the tracker's `In Asana` column to see whether the reel was already created via an ad-hoc run. Branches the pipeline:
 - No target article found (everything is `In Asana=Y`) → exit pipeline
 - Target found, both checks negative → proceed to Phase 2 (normal build)
 - Target found, Asana already has it → skip Phase 2-3, jump to Phase 4 Step 11 (flip flag), done
@@ -105,12 +125,12 @@ The "Article Coverage" tab contains three logical tables (the second is a separa
    12 columns (A–L): `# | Article Title | Published Date | Posted on IG? | Post Type | IG Post Date | IG Link | Create Post? | New Post Type | In Asana | Carousel | Webflow ID`.
    - **Column J `In Asana`** — Y once the Reel Asana tasks have been created.
    - **Column K `Carousel`** — Y once a Carousel has been built for this article. The pipeline auto-builds a carousel for **every** article (no cycle gating). Historical rows from the cycle-era may have K=N — those are not retroactively rebuilt; the column tracks "has a carousel been built for this article yet" forever forward.
-   - **Column L `Webflow ID`** — the Webflow CMS item id for this article. This is the **durable unique key** threaded through the pipeline (titles are fragile: curly quotes, Webflow edits, partial matches). Populated by Phase 1 on insert and copied to the Asana `ArticleID` custom field on each task. Used as the matching key in Phase 1.5 preflight, Phase 4 verify, and Phase 0.5 self-heal.
+   - **Column L `Webflow ID`** — legacy header name; **now holds the WordPress post `id`** (see "PLATFORM: WORDPRESS" above). This is the **durable unique key** threaded through the pipeline (titles are fragile: curly quotes, post edits, partial matches). Populated by Phase 1 on insert and copied to the Asana `ArticleID` custom field on each task. Used as the matching key in Phase 1.5 preflight, Phase 4 verify, and Phase 0.5 self-heal. Pre-migration rows still carry their old Webflow ids here — that's fine, they match the same old id on their Asana tasks.
 
 2. **Instagram Posts performance table** (rows N+1..M) — read-only for this skill; populated by other tooling.
    Columns: `# | Date Posted | Post Type | Caption | Likes | Comments | Reach | Shares | Saved | Engagement | Link`.
 
-3. **Webflow Articles slug map** — separate tab.
+3. **Articles slug map** — separate tab (legacy; not read by this skill — the WP REST API supplies slugs directly now).
 
 The webhook locates the end of the Article Coverage table by detecting the Instagram Posts header (column B = "Date Posted") and inserts new rows right above it, regardless of whether there are blank separator rows or POSTED:/NOT POSTED: summary rows in between.
 
@@ -122,6 +142,8 @@ If `search_files` with `title contains 'Wet_Ink_IG_Content_Tracker'` returns not
 
 ## WEBHOOK API
 
+> **Note on `webflow_id` everywhere in this table:** the field/param/action names are legacy (kept to avoid a webhook redeploy + sheet migration). The **value** is the WordPress post `id`. See "PLATFORM: WORDPRESS" above.
+
 The Vercel-hosted webhook (`api/webhook.js` in this repo) handles all sheet writes. It auths via OAuth refresh token tied to `andrew@hollyrandallagency.com` (same Internal OAuth client as the GA4/Search Console/YouTube MCPs — see memory note `google_analytics_mcp_auth.md`). Requests require an `X-Webhook-Secret` header.
 
 **Base URL:** `https://wet-ink-ops.vercel.app/api/webhook`
@@ -130,7 +152,7 @@ The Vercel-hosted webhook (`api/webhook.js` in this repo) handles all sheet writ
 | Action | Body | Returns |
 |---|---|---|
 | `ping` | `{"action":"ping"}` | `{ok:true, message:"pong"}` |
-| `append` | `{"action":"append", "title":"...", "date":"Month DD, YYYY", "webflow_id":"<cms item id>"}` | `{ok:true, inserted_at_row, row_number, title, webflow_id}` — or `{ok:true, skipped:true, existing_row}` if the title is already in the tracker (idempotent). `webflow_id` is optional but the pipeline should always supply it. |
+| `append` | `{"action":"append", "title":"...", "date":"Month DD, YYYY", "webflow_id":"<WP post id>"}` | `{ok:true, inserted_at_row, row_number, title, webflow_id}` — or `{ok:true, skipped:true, existing_row}` if the title is already in the tracker (idempotent). `webflow_id` is optional but the pipeline should always supply it (it's the WordPress post id). |
 | `list_titles` | `{"action":"list_titles"}` | `{ok:true, count:N, rows:[{row, num, title, date, in_asana, carousel, webflow_id}, ...]}` — every row in the Article Coverage table |
 | `flip_in_asana` | `{"action":"flip_in_asana", "title":"...", "value":"Y"|"N"}` | `{ok:true, row, value, title}` — sets column J (`In Asana`). Default value is `Y`. |
 | `flip_carousel` | `{"action":"flip_carousel", "title":"...", "value":"Y"|"N"}` | `{ok:true, row, value, title}` — sets column K (`Carousel`). Default value is `Y`. |
@@ -145,64 +167,43 @@ The `append` action auto-computes `#` (max existing + 1), fills the 12 default c
 
 ## PHASE 1: DETECT NEW ARTICLES
 
-### Step 1: Scrape the all-posts page
+### Step 1: Pull recent posts from the WordPress REST API
 
-Call `web_fetch` with `url: https://wetinkmag.com/all-posts`. The response is ~70KB of HTML and will exceed the inline token limit — `web_fetch` will save the body to a temp file and return the path. Parse from that file via bash + python.
+One cache-busted REST call returns everything Phase 1 needs — there is **no separate scrape and no separate id-lookup step** anymore (the REST response carries the post id directly).
 
-The page lists ~25-30 articles per page in reverse chronological order. Each article appears as an anchor:
-
-```html
-<a href="/posts/<slug>" ...>
-  <div class="...category...">Category Name</div>
-  <h2>Article Title</h2>
-  ...
-  <span>Month DD, YYYY</span>
-</a>
+```bash
+CB=$(date +%s)   # cache-bust: a8c CDN serves stale REST
+curl -s "https://wetinkmag.com/wp-json/wp/v2/posts?per_page=30&_embed=1&orderby=date&order=desc&_cb=$CB" \
+  -H "User-Agent: Mozilla/5.0 (WetInk-Pipeline)" > /tmp/wetink_posts.json
 ```
 
-**URL pattern is `/posts/<slug>` (with the `s`).** A previous version of this skill used `/post/` — that's wrong.
-
-Parse out: title, category, publish date, slug, full URL. Pattern that works:
+Posts come back newest-first. Parse each one with python:
 
 ```python
-import re, html as htmllib
-pat = re.compile(r'<a [^>]*href="(/posts/[^"]+)"[^>]*>(.*?)</a>', re.DOTALL)
-for href, inner in pat.findall(page):
-    slug = href.rsplit('/', 1)[-1]                # KEEP — used to resolve webflow_id below
-    title_m = re.search(r'<h2[^>]*>(.*?)</h2>', inner, re.DOTALL)
-    title = htmllib.unescape(re.sub(r'<[^>]+>', '', title_m.group(1))).strip() if title_m else ''
-    date_m = re.search(r'\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+\d{1,2},?\s+\d{4}\b', inner)
-    date = date_m.group(0) if date_m else ''
-    cat_m = re.search(r'<div[^>]*class="[^"]*cate[^"]*"[^>]*>(.*?)</div>', inner, re.DOTALL)
-    category = re.sub(r'<[^>]+>', '', cat_m.group(1)).strip() if cat_m else ''
-    # ...
+import json, re, html as htmllib
+posts = json.load(open('/tmp/wetink_posts.json'))
+articles = []
+for p in posts:
+    wp_id = p['id']                                            # ← the durable key (stored as webflow_id)
+    slug  = p['slug']
+    url   = p['link']                                          # https://wetinkmag.com/posts/<slug>/
+    title = htmllib.unescape(re.sub(r'<[^>]+>', '', p['title']['rendered'])).strip()
+    date  = p['date'][:10]                                     # ISO 'YYYY-MM-DD'; reformat for the tracker (below)
+    terms = p.get('_embedded', {}).get('wp:term', [])          # [ [categories...], [tags...] ]
+    category = terms[0][0]['name'] if terms and terms[0] else ''
+    articles.append(dict(wp_id=wp_id, slug=slug, url=url, title=title, date=date, category=category))
 ```
 
-Dedupe by slug (the page sometimes renders both a tile and a featured-card link to the same article). **Keep the slug per article** — Step 1.5 below uses it to resolve the Webflow CMS item id, which we thread through as the durable unique key.
+Notes:
+- **`wp_id` is the durable unique key** the pipeline threads through (tracker column L `Webflow ID`, Asana `ArticleID` custom field GID `1215162242710046`, and every preflight/verify/self-heal match). It is **always present** in the REST response — the old "lookup failed → empty key" fallback is effectively dead for new articles.
+- **Permalink** is `p['link']` — `https://wetinkmag.com/posts/<slug>/`. Don't reconstruct it by hand.
+- **Title** comes from `title.rendered`, which contains HTML entities (`&#8217;`, `&amp;`, …) — always `htmllib.unescape` before comparing or storing.
+- **Tracker date format:** the tracker stores `Month DD, YYYY` (e.g. `June 24, 2026`). Convert the ISO date: `datetime.fromisoformat(p['date']).strftime('%B %-d, %Y')`.
+- **Category** is the first category term. WP category labels (`Sidenotes`, `Business`, `Industry`, `Features`, `Creators`, `Galleries`, …) may differ slightly from the skill's prose ("Side Notes") — the downstream reels/carousel skills handle per-category framing, so pass the WP label through as-is.
 
-**Page 1 is sufficient for daily runs** — new articles always appear at the top. Only fetch page 2 if doing initial sheet setup.
+**`per_page=30` of the newest posts is plenty for daily runs** — new articles always sort to the top. Only raise `per_page` (or page with `&page=2`) when doing initial sheet setup or a backfill.
 
-### Step 1.5: Resolve Webflow CMS item id for each parsed article
-
-Once Step 1 has the list of articles, look up the Webflow CMS item id for each. The id is the durable unique key the pipeline threads through:
-
-- tracker column L (`Webflow ID`)
-- Asana `ArticleID` custom field (GID `1215162242710046`) on every task this pipeline creates
-- Phase 1.5 preflight matches Asana tasks by ArticleID, not by name
-- Phase 4 verify and Phase 0.5 self-heal match by ArticleID
-
-Load the Webflow MCP `data_cms_tool` via `tool_search` if not already loaded. The Wet Ink site exposes a "Posts" collection. For each parsed article, query items by slug:
-
-```
-data_cms_tool
-  action: "list_collection_items"   # or whatever the MCP exposes for filtered list
-  collection: "Posts"               # or its collection id, look up once and cache
-  filter: { slug: <article.slug> }  # exact match on the slug
-```
-
-Take `item.id` from the response → that's the `webflow_id`. Save it on the article record alongside `title`, `date`, `category`, `slug`, `url`.
-
-If `data_cms_tool` lookup fails (collection not found, slug not matched, MCP down): log a warning and proceed with `webflow_id=""`. The webhook accepts empty webflow_id and the row will just be missing column L (backfill can fix it later). Do NOT fail the pipeline over a webflow_id lookup miss — Phase 1.5 preflight gracefully falls back to title matching when an article has no webflow_id.
+If the REST call fails (non-200, empty body, network error): retry once with a fresh cache-bust, then stop the pipeline and report — do NOT fall back to HTML scraping (the Elementor markup is not a stable parse target).
 
 ### Step 2: Read the tracker via webhook
 
@@ -226,7 +227,7 @@ An article from the site is "new" if its title does not appear in the sheet's Ar
 - Strip leading/trailing whitespace
 - Strip trailing `?`, `!`, `.`, `,`
 - Normalize curly quotes (`’` → `'`, `“` → `"`)
-- If a site title is a close-but-not-exact match (likely a Webflow edit), flag for the user instead of treating as new
+- If a site title is a close-but-not-exact match (likely a post edit in WordPress), flag for the user instead of treating as new
 
 ### Step 4: Append new rows via the webhook
 
@@ -238,9 +239,9 @@ curl -X POST "https://wet-ink-ops.vercel.app/api/webhook" \
   -H "X-Webhook-Secret: $WEBHOOK_SECRET" \
   -d '{
     "action": "append",
-    "title": "<article title verbatim from scrape>",
-    "date":  "<Published Date, e.g. \"May 12, 2026\">",
-    "webflow_id": "<Webflow CMS item id from Step 1.5; omit or empty string if lookup failed>"
+    "title": "<unescaped article title from Step 1>",
+    "date":  "<Published Date, Month DD, YYYY, e.g. \"June 24, 2026\">",
+    "webflow_id": "<the WordPress post id (wp_id) from Step 1>"
   }'
 ```
 
@@ -253,7 +254,7 @@ The webhook handles everything: auto-computes the next `#`, fills the 12 default
 ### Step 5: Report findings
 
 Tell the user:
-- Total articles parsed from page 1 of all-posts (or from the Webflow CMS fallback)
+- Total posts pulled from the WordPress REST API this run
 - Count already in tracker
 - Count newly appended this run (with titles, dates, categories, URLs)
 - Count of "backlog" rows (already in tracker but `In Asana = N`)
@@ -324,7 +325,7 @@ From the `list_titles` response in Phase 1 Step 2 (still in context), filter row
 Sort that filtered set by `Published Date` descending — newest first. The first row is the **target article** for this iteration.
 
 This rule naturally:
-- Picks up freshly-scraped articles immediately (they were appended with `In Asana=N` in Phase 1 Step 4)
+- Picks up freshly-detected articles immediately (they were appended with `In Asana=N` in Phase 1 Step 4)
 - Catches up "backlog" rows from the last few days that were appended on prior runs but never built
 - Skips articles that are already in Asana (`In Asana=Y`)
 - Skips the long tail of older articles (~70 pre-May-10 rows that aren't worth retroactively building)
@@ -369,7 +370,7 @@ mcp__asana__search_tasks:
 
 (The Wet Ink Social Media project ID and other operational IDs live in `instagram-reels` SKILL.md "Required Asana IDs" section — do not restate them here.)
 
-**Why custom-field search and not title search:** titles are fragile. Webflow edits, curly-quote drift, and partial-substring false positives caused the original failure mode this whole change was designed to fix. The ArticleID custom field is the durable unique key.
+**Why custom-field search and not title search:** titles are fragile. Post edits in WordPress, curly-quote drift, and partial-substring false positives caused the original failure mode this whole change was designed to fix. The ArticleID custom field is the durable unique key.
 
 **Match interpretation** (carousel is always expected on new builds — see Step 5.5b):
 - **3 matches** → **Asana has the full set** (Uncensored + SFW + Carousel). Treat as "skipped-built-already" and route to Phase 4 Step 11.
@@ -377,7 +378,7 @@ mcp__asana__search_tasks:
 - **1 or 2 matches on a new-era row** → **partial-built**. The pipeline crashed mid-Phase-4 in a previous run. Treat as "needs build" so Phase 2-4 fires and the verify step (Phase 4 Step 10.5) creates the missing task(s). Phase 4 Step 10 task creation should idempotently skip the already-existing ones (search again right before each create).
 - **0 matches** → **needs build** (normal path).
 
-**Fallback when `target.webflow_id` is empty** (e.g., older row from before the column existed, or Step 1.5 lookup failed): fall back to the original name-based search:
+**Fallback when `target.webflow_id` is empty** (e.g., a pre-migration row from before the column existed, or one with no id stored): fall back to the original name-based search:
 
 ```
 mcp__asana__search_tasks_preview:
@@ -420,7 +421,15 @@ The decision and reasoning must appear in the Phase 4 final report so it's clear
 
 ### Step 6: Fetch article content
 
-For the **target article** identified in Phase 1.5 Step 5.5, fetch the article page with `web_fetch` (or via the Webflow CMS MCP `data_cms_tool` if WebFetch is blocked — the Webflow CMS fallback is also available as a fallback for Phase 1's site scrape).
+For the **target article** identified in Phase 1.5 Step 5.5, fetch the full post from the WordPress REST API by id (you already have `wp_id` from Phase 1; it's the value stored as the row's `webflow_id`):
+
+```bash
+CB=$(date +%s)
+curl -s "https://wetinkmag.com/wp-json/wp/v2/posts/<wp_id>?_embed=1&_cb=$CB" \
+  -H "User-Agent: Mozilla/5.0 (WetInk-Pipeline)" > /tmp/wetink_target.json
+```
+
+This single object carries the title, full body HTML (`content.rendered`), featured image, and category — everything below. (If the row only has an old/empty `webflow_id`, fall back to fetching by slug: `.../posts?slug=<slug>&_embed=1` and take element 0.)
 
 Extract and stash for use by both subagents:
 
@@ -438,24 +447,42 @@ Extract and stash for use by both subagents:
 
 The first image in the list is the **hero** — it should always be present. Subsequent images come from the article body. The Reel build distributes images across the 5 scenes (see `instagram-reels` SKILL.md for the distribution algorithm).
 
-**When fetching via Webflow CMS (`data_cms_tool`)**:
-The Wet Ink Posts collection schema has **two separate top-level image fields** plus inline body images. Extract all three categories:
+Build `article_image_urls` from the WordPress REST object (`/tmp/wetink_target.json`). WordPress has **one featured image** (not Webflow's separate main/thumbnail fields) plus inline body images:
 
-1. **`fieldData["main-image"].url`** — the article-page hero. Place at **element 0** of `article_image_urls`.
-2. **`fieldData["thumbnail-image"].url`** — the listing-card thumbnail. **This is a SEPARATE field with a DIFFERENT image** (typically a different shot from the same photoshoot — confirmed for Wet Ink posts). Place at **element 1**. Do NOT assume it duplicates `main-image`; verify by URL and de-dupe only if the URLs literally match.
-3. **Body images** — parse `fieldData["content"]` (rich-text HTML). Extract every `<img src="...">` whose `src` is on `cdn.prod.website-files.com`. Append them in document order starting at element 2.
+```python
+import json, re
+p = json.load(open('/tmp/wetink_target.json'))
+urls = []
 
-Final `article_image_urls` for a typical Wet Ink post: `[main-image, thumbnail-image, body_img1, body_img2, ...]`. Most posts will produce 2-4 entries. The N≥2 distribution rule in `instagram-reels` Step 3 handles all the spreads.
+# 1) Featured image = the hero, element 0
+fm = p.get('_embedded', {}).get('wp:featuredmedia', [])
+if fm and fm[0].get('source_url'):
+    urls.append(fm[0]['source_url'])
 
-If `main-image` is missing or empty, fall back to `thumbnail-image` as element 0. If both are missing, do NOT proceed to Phase 2 — see the "If `article_image_urls` is empty" rule below.
+# 2) Body images in document order, appended after the hero
+body = p['content']['rendered']
+for src in re.findall(r'<img[^>]+src="([^"]+)"', body):
+    urls.append(src)
 
-**When scraping the live page (`web_fetch` or raw HTML)**:
-- Hero image is the CSS `background-image` on the `.hero-image` div (NOT an `<img>` tag — the page uses CSS bg for the header).
-- Body images are `<img>` tags inside the article body, NOT inside `.side-social-button`, `.social-icon`, `.menu-*`, `.post-thumb` (related-posts thumbnails in the footer), or any nav/footer chrome. Filter aggressively — only inline `<img>` tags on `cdn.prod.website-files.com` with `naturalWidth > 200`.
+# 3) Filter + de-dupe (preserve order)
+def keep(u):
+    return ('/wp-content/uploads/' in u
+            and re.search(r'\.(jpe?g|png|webp)(\?|$)', u, re.I)
+            and not re.search(r'(icon|thumb|avatar|logo|sprite)', u, re.I))
+seen, article_image_urls = set(), []
+for u in urls:
+    base = u.split('?')[0]                  # ignore WP resize query strings when de-duping
+    if keep(u) and base not in seen:
+        seen.add(base); article_image_urls.append(u)
+```
 
-**De-duplicate.** If the same URL appears in both the hero field and the body (the CMS sometimes auto-inserts the hero into the body), keep only the first occurrence.
+Notes:
+- **Element 0 is the featured image (the hero)** — it should always be present. If `wp:featuredmedia` is missing, the first surviving body image becomes element 0.
+- **All article images are on `https://wetinkmag.com/wp-content/uploads/...`** — never `cdn.prod.website-files.com`. Drop anything off that path, plus icons/thumbs/avatars/logos.
+- WordPress often serves resized variants with `?w=`/`?resize=` query strings and `-1024x768`-style suffixes. The `_embedded` featured `source_url` is the full-size original — prefer it. De-dupe on the path (ignoring query string) so a resized copy of the hero in the body doesn't double-count.
+- Most Wet Ink posts produce 1–4 entries (many Side Notes posts are featured-image-only). The N≥1 distribution rule in `instagram-reels` Step 3 handles every spread.
 
-**Validation.** Each URL should match `https://cdn.prod.website-files.com/...\.(jpe?g|png|webp)`. Drop anything that doesn't, plus anything that looks like an icon or thumbnail (path includes `icon`, `thumb`, `avatar`, `logo`).
+**If `article_image_urls` is empty, do NOT proceed to Phase 2** — see the rule above.
 
 ### Step 7: Spawn the two build subagents in parallel
 
@@ -592,7 +619,7 @@ Defer to `instagram-reels` SKILL.md Step 9 for task structure (assignee, section
 
 **Every task MUST set the ArticleID custom field.** This is the durable unique key the rest of the pipeline (preflight, self-heal, verify) matches on. Add `custom_fields: {"1215162242710046": "<target.webflow_id>"}` to every task object in the `create_tasks` call. (Note: on **create/update**, the custom_fields map uses the plain GID as the key — `.contains` is a SEARCH filter qualifier and does NOT apply to writes. The `update_tasks` MCP also accepts a nested object directly rather than a JSON string.)
 
-If `target.webflow_id` is empty for this article (older row that wasn't backfilled, or Step 1.5 lookup failed): create the tasks without the custom field but log a WARNING in the final report — the article will be invisible to Phase 0.5 self-heal and Phase 1.5 preflight ArticleID search, falling back to title-based matching only.
+If `target.webflow_id` is empty for this article (a pre-migration row that wasn't backfilled, or one with no id stored): create the tasks without the custom field but log a WARNING in the final report — the article will be invisible to Phase 0.5 self-heal and Phase 1.5 preflight ArticleID search, falling back to title-based matching only.
 
 **Step 10a — Idempotency pre-check (MANDATORY).** Before calling `create_tasks`, search Asana by ArticleID to see what tasks already exist for this article:
 
@@ -747,10 +774,9 @@ The Desktop path is less reliable than the subagent gate because the same contex
 
 Only IDs that don't belong to a downstream skill:
 
-- **Wet Ink site URL:** `https://wetinkmag.com/all-posts`
+- **WordPress REST posts endpoint:** `https://wetinkmag.com/wp-json/wp/v2/posts?_embed=1` (always cache-bust with `&_cb=$(date +%s)`). Single article URLs: `https://wetinkmag.com/posts/<slug>/`.
 - **Tracker sheet ID:** `1sPQwj2ZSu9A7drg2YuUwQrcwVQ7JQNcbM7qRbQhMhaA`
-- **Webflow Posts collection:** look up once via `data_cms_tool` `list_collections` (cached if the lookup is repeated within a run)
-- **Asana `ArticleID` custom field GID:** `1215162242710046` (text custom field on the Wet Ink Social Media project `1214264767251100`). Holds the Webflow CMS item id. THE durable unique key the pipeline matches on — never use title-substring matching when this is available.
+- **Asana `ArticleID` custom field GID:** `1215162242710046` (text custom field on the Wet Ink Social Media project `1214264767251100`). Holds the **WordPress post id** (pre-migration rows hold their old Webflow ids — see "PLATFORM: WORDPRESS"). THE durable unique key the pipeline matches on — never use title-substring matching when this is available.
 - **Asana `ArticleID` custom_field_settings GID** (only needed for admin/setup, not for normal pipeline operation): `1215162242710047`
 - **Backup report directory:** `/Users/andrewnagle/Claude/Wet Ink Organic Social Posts/`
 
@@ -766,13 +792,13 @@ All Canva template/folder/brand-kit IDs and all Asana project/section/assignee/c
 
 **Articles with explicit titles:** The SFW reel and SFW X/Twitter copy each need a reframed title/lead. Both subagents handle this in their own skills — no coordination needed at this layer.
 
-**Webflow title edits:** If a site title is similar but not identical to a tracked title, do NOT auto-add as new. Flag the diff to the user and let them confirm.
+**Post title edits:** If a live WordPress title is similar but not identical to a tracked title, do NOT auto-add as new. Flag the diff to the user and let them confirm.
 
 **Sheet write fails (Phase 1):** If the webhook returns an error (e.g., Vercel deploy is down, refresh token revoked), save the proposed rows to the backup file and stop the pipeline. Do NOT proceed to Phase 2-4 without a confirmed tracker write — that's how duplicate work happens.
 
-**Multiple unprocessed articles** (newly-scraped + backlog from prior runs): Phase 2-4 processes exactly one per run — the most recent unprocessed article, per Phase 1.5 Step 5.5's selection rule. Older unprocessed articles get picked up by subsequent runs (which fire twice daily). Tell the user how many backlog candidates remain after this run.
+**Multiple unprocessed articles** (newly-detected + backlog from prior runs): Phase 2-4 processes exactly one per run — the most recent unprocessed article, per Phase 1.5 Step 5.5's selection rule. Older unprocessed articles get picked up by subsequent runs (which fire twice daily). Tell the user how many backlog candidates remain after this run.
 
-**Curly-quote drift:** Webflow renders straight quotes (`'`) but Google Sheets sometimes auto-corrects to curly (`’`). Always normalize quote characters before comparing titles.
+**Curly-quote drift:** WordPress `title.rendered` returns HTML-entity-encoded straight quotes (unescape them) but Google Sheets sometimes auto-corrects to curly (`’`). Always normalize quote characters before comparing titles.
 
 **Reviewer FAIL on one design but not the other:** Treat as overall FAIL. Don't half-commit. Save the report and stop.
 
@@ -813,7 +839,7 @@ Total: ~330-375K tokens per article (Reel + Carousel always). Wall-clock time is
 
 When this skill is invoked from a scheduled task (no user present, no laptop required):
 
-- Phase 1 runs to completion: scrape, read tracker, append new article rows via the webhook.
+- Phase 1 runs to completion: pull posts from the WordPress REST API, read the tracker, append new article rows via the webhook.
 - Phase 1.5 selects the most recent unprocessed article (`In Asana != Y` AND `Published Date >= 2026-05-10`) and runs the preflight on it. If Asana already has it, skip ahead to Phase 4 Step 11 (flip flag) for that article. If both checks positive (fully done), skip to the loop check. If no eligible article exists at all, exit.
 - Phase 2-4 proceed for the selected target article, **only if Phase 1.5 says proceed AND Step 6 found at least one usable article image**.
 - After each Phase 4 completes (or after Phase 1.5 routes around Phase 2-3), **loop back to Phase 1.5** and process the next eligible article. Up to 10 articles per run (safety cap).

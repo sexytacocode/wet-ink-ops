@@ -24,9 +24,30 @@ update.
 Do not deviate from it. If something looks wrong, save a report and
 stop — do not improvise fixes.
 
+## Inbound news → draft pipeline
+
+When invoked, follow `.claude/skills/news-triage/SKILL.md` end to end.
+This is a fast NEWS desk (the OUTBOUND-news counterpart to
+content-pipeline): it scans the adult-industry trade press (AVN, XBIZ,
+YNOT) + mainstream crossover coverage for TIMELY current stories in Wet
+Ink's beats — platform news, law & money (age-verification, bills,
+creator taxes, payment processors), notable performers, industry-wide —
+scores them on a newsworthiness + relevance rubric (multi-outlet pickup
+is the key signal), writes a fast original news draft in Wet Ink voice
+for every in-scope story scoring 3+, and files an Asana task in the
+"Wet Ink — News Triage" project with the full draft embedded in the card
+(embed-only — no Google Doc). Its only output is the editorial draft;
+social graphics stay with content-pipeline. It is NOT for evergreen
+keyword SEO (how-to guides, "X vs Y" comparisons, glossary/pillar
+pages) — Wet Ink writes those in-house. Rejected + already-covered
++ out-of-scope stories are logged to the Triage Log task. Not yet
+scheduled — runs on demand until validated, then promote to a daily
+(≤48h window) or weekly (≤7d) routine.
+
 ## Skills available in this repo
 
-- `content-pipeline` — orchestrator for the daily run
+- `content-pipeline` — orchestrator for the daily social run
+- `news-triage` — inbound industry-news → SEO draft → Asana assignment
 - `instagram-reels` — source of truth for Reel template, Canva folder,
   brand kit, Asana project/section/assignee/follower IDs
 - `social-post-optimizer` — platform-specific caption rules (Instagram,

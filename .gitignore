@@ -13,3 +13,7 @@ service-account-key.json
 .env*.local
 # Subagent worktrees (transient, created by Claude Code isolation mode)
 .claude/worktrees/
+
+# Catch-all: .env.pipeline / .env.prod were NOT matched by the patterns above
+# and hold live Postgres passwords + OAuth secrets. Keep this broad.
+.env*

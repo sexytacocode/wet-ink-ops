@@ -10,7 +10,7 @@ description: >
   Read-only in effect: opens an editing transaction to inspect the
   element tree, then cancels it without committing. Never modifies the
   design. Never creates tasks.
-tools: [tool_search]
+tools: [ToolSearch]
 model: sonnet
 ---
 

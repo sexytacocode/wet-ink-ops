@@ -12,16 +12,39 @@ description: >
   attempting to build Reels manually or using generate-design from scratch.
 ---
  
+## 🚧 **MODE: UNCENSORED_ONLY** (set 2026-06; re-confirmed by Andrew 2026-07-21)
+
+**This flag overrides every dual-version instruction in this file.** The current mode is
+**UNCENSORED_ONLY**: create the **Long Uncensored Reel ONLY** — do **NOT** create the SFW version.
+
+Under UNCENSORED_ONLY:
+- **1 Reel per article**, not 2. One Asana task for that Reel, not two.
+- Every instruction below that says "both versions" / "two versions" / "2 versions required" /
+  "Never create just one" / "repeat for both versions" is **conditional on this flag** — read each
+  as referring to the single Uncensored Reel.
+- The article still gets its Instagram Carousel from `instagram-carousel`. Net output per article
+  is **2 pieces: 1 Uncensored Reel + 1 Carousel.**
+
+When dual-version production resumes, change this flag to **MODE: DUAL_VERSION** and the
+dual-version rules below take effect again.
+
+> **Why this block exists.** This flag was set in June 2026 but lived only in the claude.ai-synced
+> copy of this skill, never in this canonical one — while `content-pipeline` (which drives this
+> skill) points here by path. So the pipeline could never see the policy, and on 2026-07-21 it
+> built 5 unwanted SFW reels. Keep this block at the top of the canonical file.
+
+---
+
 ## ⚠️ PRE-FLIGHT CHECKLIST — READ BEFORE DOING ANYTHING
  
 Before writing a single line of copy or making any API call, confirm all of the following:
  
-- [ ] **2 versions required per article** — Long Uncensored and Long SFW. Never create just one.
+- [ ] **1 version per article (MODE: UNCENSORED_ONLY)** — Long Uncensored only. Under DUAL_VERSION: 2 — Long Uncensored + Long SFW.
 - [ ] **Correct template** — Both versions use `DAHILFJfnqU`.
 - [ ] **Move to folder after each commit** — Every completed Reel must be moved to `FAHHtY3V36U` using `Canva:move-item-to-folder`. This is not optional.
 - [ ] **Load `Canva:move-item-to-folder`** via `tool_search` before starting — it is a deferred tool.
 - [ ] **Draft Uncensored text first**, then adapt to SFW. Not the other way around.
-- [ ] **Create Asana tasks after both Reels are done** — one task per Reel, assigned to Natasha, with Holly as a collaborator, in "To Edit" section. Include Canva edit links.
+- [ ] **Create Asana tasks after both Reels are done** — one task per Reel, assigned to Jude, with Holly as a collaborator, in "To Edit" section. Include Canva edit links.
 - [ ] **Check the tracker before building** — open the `Wet_Ink_IG_Content_Tracker` Article Coverage tab and confirm the article's `In Asana` column is `N`. If it's already `Y`, the reel was already created in a previous run; do NOT duplicate. Surface this to the user and ask before proceeding.
 If any of the above is unclear, re-read the full skill before proceeding.
  
@@ -82,7 +105,7 @@ The active brand kit is **Wet Ink 2** (`kAHMSfM8ZjU`). The template `DAHILFJfnqU
 - **"To Edit" section:** `1214264977347926`
 - **"Edited" section:** `1214265071278910`
 - **"Published" section:** `1214265072303679`
-- **Natasha (assignee):** `1213652591985519`
+- **Jude (assignee):** `1215070171246360`
 - **Holly Randall (collaborator):** `1212147273860299`
 - **ArticleID custom field:** `1215162242710046` (text custom field on the Wet Ink Social Media project). Holds the **WordPress post id** for the article (the field name `webflow_id` is legacy — wetinkmag.com moved off Webflow to WordPress; the value is now a WP post id, e.g. `1305`). Set on every task this skill creates so the parent pipeline can match tasks to articles by a durable unique key. The caller (content-pipeline) supplies `webflow_id` (= the WP post id); if this skill is invoked standalone without one, find it via `https://wetinkmag.com/wp-json/wp/v2/posts?slug=<slug>` (take `id`), ask the user, or skip the custom field with a logged warning.
 ---
@@ -154,7 +177,7 @@ Search for and load the following Canva tools (they are deferred and must be loa
 - `Canva:commit-editing-transaction` — to save changes
 - `Canva:get-design-thumbnail` — to preview scenes
 - `Canva:move-item-to-folder` — to move each completed design to the shared folder
-- `Asana:create_tasks` — to create editing tasks for Natasha (load via `tool_search` query "create tasks")
+- `Asana:create_tasks` — to create editing tasks for Jude (load via `tool_search` query "create tasks")
 **Important:** Load these tools early in the conversation before they cycle out of context.
  
 ### Step 3: Upload Article Images (one upload call per image)
@@ -348,7 +371,7 @@ Canva's MCP does not currently support direct video export. After the design is 
 3. If Canva adds an export API in the future, this step can be automated.
 ### Step 9: Create Asana Tasks
  
-After both Reels are committed and moved to the shared folder, create one Asana task per Reel in the "To Edit" section of the Wet Ink Social Media project, assigned to Natasha with Holly Randall added as a collaborator.
+After both Reels are committed and moved to the shared folder, create one Asana task per Reel in the "To Edit" section of the Wet Ink Social Media project, assigned to Jude with Holly Randall added as a collaborator.
  
 Use `Asana:create_tasks` (load via `tool_search` if needed) with:
  
@@ -358,7 +381,7 @@ tasks: [
   {
     name: "[Article Title] — Long Uncensored Reel",
     notes: "Edit text and images as needed.\n\nCanva link: https://www.canva.com/design/[design_id]/edit\n\nArticle: [article title]\nVersion: Long Uncensored (5 scenes)",
-    assignee: "1213652591985519",
+    assignee: "1215070171246360",
     section_id: "1214264977347926",
     followers: "me,1212147273860299",
     custom_fields: '{"1215162242710046":"<webflow_id>"}'
@@ -366,7 +389,7 @@ tasks: [
   {
     name: "[Article Title] — Long SFW Reel",
     notes: "Edit text and images as needed.\n\nCanva link: https://www.canva.com/design/[design_id]/edit\n\nArticle: [article title]\nVersion: Long SFW (5 scenes)",
-    assignee: "1213652591985519",
+    assignee: "1215070171246360",
     section_id: "1214264977347926",
     followers: "me,1212147273860299",
     custom_fields: '{"1215162242710046":"<webflow_id>"}'
@@ -374,7 +397,7 @@ tasks: [
 ]
 ```
  
-**Important:** Include the Canva edit link in each task description so Natasha can go straight to it. Add the user (Andrew) and Holly Randall as followers on each task using `followers: "me,1212147273860299"`.
+**Important:** Include the Canva edit link in each task description so Jude can go straight to it. Add the user (Andrew) and Holly Randall as followers on each task using `followers: "me,1212147273860299"`.
 
 **ArticleID custom field:** Both task objects MUST set `custom_fields: '{"1215162242710046":"<webflow_id>"}'`. `webflow_id` here is the **WordPress post id** for this article (legacy field name — see note above) — the durable unique key the content-pipeline matches tasks against. The parent pipeline passes it in when invoking this skill. If invoked standalone with none available, either (a) resolve it from `https://wetinkmag.com/wp-json/wp/v2/posts?slug=<slug>` (take `id`) or ask the user, or (b) omit the `custom_fields` entry entirely and log a warning that the task will be invisible to the pipeline's ArticleID-based search. Do NOT make up a value.
  
@@ -434,7 +457,7 @@ To create Reels for multiple articles:
 1. Gather all article content first
 2. Upload all images to Canva
 3. Create each Reel sequentially (duplicate → edit → commit → move to folder)
-4. Create Asana tasks for all completed Reels (one task per Reel, assigned to Natasha, with Holly as collaborator)
+4. Create Asana tasks for all completed Reels (one task per Reel, assigned to Jude, with Holly as collaborator)
 5. Provide all Canva links at the end (use the `https://www.canva.com/design/{design_id}/edit` format — see Step 4)
 **Important:** In long conversations, Canva tools may cycle out of context. If tools become unavailable, suggest the user start a fresh chat with the article details pre-loaded.
  

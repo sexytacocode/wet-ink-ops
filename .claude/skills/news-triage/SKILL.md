@@ -6,14 +6,19 @@ description: >
   Wet Ink's beats — platform news (acquisitions, feature launches, policy changes), law
   & money (age-verification laws, bills, creator taxes, payment-processor moves), notable
   adult creators/performers in the news, and industry-wide stories the media is picking
-  up — and turns them into a quick first draft so Wet Ink stays current and rides the news
-  cycle. Scores each story on a newsworthiness + relevance rubric (multi-outlet pickup is
-  the key signal), writes an original news draft in Wet Ink voice, and files an Asana task
-  in the "Wet Ink — News Triage" project with the full draft embedded in the card (no
-  Google Doc — embed-only is the default). This is the OUTBOUND-news counterpart to
-  content-pipeline (which turns our OWN published articles into social). The desk's only
-  output is the editorial draft → Asana; social graphics are explicitly out of scope for now
-  (that stays with content-pipeline). It is NOT for evergreen, search-keyword content
+  up — and turns them into a rich multi-outlet summary plus a short Wet Ink angle so Wet Ink
+  stays current and rides the news cycle. Scores each story on a newsworthiness + relevance
+  rubric (multi-outlet pickup is the key signal), writes a structured SOURCE SUMMARY that
+  synthesizes EVERY outlet covering the story (topline, what happened, key quotes, the bigger
+  picture, and how the coverage connects) followed by a 1–2 sentence Wet Ink pitch, and files
+  an Asana task in the "Wet Ink — News Triage" project with the summary + pitch embedded in
+  the card (no Google Doc — embed-only is the default). It does NOT write the finished
+  article — editors write that from the summary. This is the OUTBOUND-news counterpart to
+  content-pipeline (which turns our OWN published articles into social). The desk's main
+  output is the source summary + pitch → Asana; it also attaches a draft social card to
+  INSTAGRAM-destination stories only (Phase 5.5, added 2026-07-29 at Andrew's request —
+  those stories never become articles, so nothing else would ever make art for them).
+  Finished captions and all ARTICLE/BOTH artwork stay with content-pipeline. It is NOT for evergreen, search-keyword content
   (how-to guides, "X vs Y" comparisons, glossary/pillar pages) — Wet Ink writes those
   in-house; this desk only does current news. Triggers include: "run the news triage," "check industry news," "what's
   happening in the industry," "news triage," "any breaking adult-industry news," "what
@@ -28,8 +33,9 @@ description: >
 - [ ] **bash / curl / python3 available** — Phase 2.5 already-covered check hits the wetinkmag.com WordPress REST API (`/wp-json/wp/v2/posts?search=...`) to confirm Wet Ink hasn't already published the story.
 - [ ] **Asana MCP loaded** — Phase 0 dedupe read + Phase 5 task creation. Load via `tool_search` query `"asana"`.
 - [ ] **Google Drive MCP loaded** — Phase 4 Google Doc creation. Load via `tool_search` query `"google drive create_file"`. The `create_file` tool turns `textContent` (markdown/plain) into a native `application/vnd.google-apps.document` automatically — that is the draft.
-- [ ] **Skills referenced** — `wet-ink-voice` (mandatory for every draft), optionally `social-post-optimizer` for the suggested social hook. Read them when invoked; do not restate their rules here.
+- [ ] **Skills referenced** — `wet-ink-voice` (for the Wet Ink angle/pitch line only — the summary itself is neutral reporting). Read it when invoked; do not restate its rules here.
 - [ ] **Rubric** — read `rubric.md` in this skill folder before scoring. It holds the current SEO keyword clusters (distilled from the "Wet Ink SEO Audit — April 2026" Asana project) and the scoring bands.
+- [ ] **Social card tool (only if any story routes `INSTAGRAM`)** — `bin/wetink-card/` needs the `higgsfield` CLI on `$PATH` with credits (`higgsfield account status`), and `attach-card.sh` needs `ASANA_TOKEN` exported. Neither is a blocker: if either is missing, file the tasks without cards and say so in the run report.
 
 ---
 
@@ -49,21 +55,62 @@ This skill does NOT restate the Wet Ink voice rules, the social caption rules, o
 
 **Phase 2.5 — Already-covered check (wetinkmag.com) — MANDATORY GATE.** Before any accepted story is drafted, query the live WordPress site to confirm Wet Ink has not already published an article on it. A story that passes the Asana ledger (never triaged) can still already exist as a published post — the two layers catch different things. See "ALREADY-COVERED CHECK" below. Already-covered stories are dropped from drafting and logged as `already-covered` (not as score-rejects).
 
-**Phase 3 — Draft (one subagent per accepted story).** For each accepted story, write an ORIGINAL first-draft article in Wet Ink voice. This is a Wet Ink *take* — reported and rewritten, never a copy-paste of the source. See "Draft spec" below. Invoke `wet-ink-voice` inside each draft.
+**Phase 2.6 — Route to a destination.** For every story that survived 2.5, score two more axes from `rubric.md` — **search demand / SEO value (0–3)** and **social pull (0–3)** — and derive a **DESTINATION**: `ARTICLE`, `INSTAGRAM`, `BOTH`, or `NEITHER`. These do not change accept/reject; they answer what the story should *become*. Some stories are for readers to read, others exist to be found in search — different jobs, and one story rarely does both equally. Verify any SEO score of 2–3 against real Search Console data (`mcp__search-console__get_search_analytics`, wetinkmag.com, last 28 days, filtered to the story's core query) and record the actual impressions/clicks on the card. `NEITHER` gets a line in the run report, not a card.
 
-**Phase 4 — (removed.)** Drafts are embedded in the Asana card, not saved as Google Docs. Embed-only is the default (Andrew's call, 2026-06-25): simpler, self-contained, no Drive dependency (Drive's daily write quota bit a prior run). Skip Doc creation entirely.
+**Phase 3 — Summarize (one subagent per accepted story).** For each accepted story, write a structured SOURCE SUMMARY that synthesizes **every** outlet covering it — topline, what happened, key quotes, the bigger picture, and how the coverage connects — then a 1–2 sentence Wet Ink angle/pitch. This is reporting for an editor, NOT a finished article; the editor writes the article from it. See "Summary spec" below. Invoke `wet-ink-voice` for the pitch line only; the summary body stays neutral and attributed.
+
+**Phase 4 — (removed.)** Summaries are embedded in the Asana card, not saved as Google Docs. Embed-only is the default (Andrew's call, 2026-06-25): simpler, self-contained, no Drive dependency (Drive's daily write quota bit a prior run). Skip Doc creation entirely.
 
 **Phase 5 — File Asana tasks.**
-- **5a (accepted):** one task per draft in News Triage → **New Review** section, assignee + follower per "Required IDs", with the structured card (source, outlets covering, link, score, beat, pitch, angle, reasoning) followed by the **full draft embedded in `html_notes`** (see "ASANA TASK" for the format). No Google Doc. Staff then move it to **Approved** (taking it into their content timeline) or **Not Interested** (rejected — reviewed weekly).
-- **5b (not-drafted log):** record every NOT-drafted candidate — score-rejected (0–2), `already-covered` (with the existing post id/link), and `out-of-scope (evergreen — in-house)` — in the Phase 6 run report with one-line reasoning, so the rubric stays auditable and the same story isn't re-checked blindly next run. Do NOT file these as Asana cards (the bot's rejects are distinct from staff's "Not Interested" moves). Optionally maintain a single recurring "News Triage — Log" task in New Review if Andrew later wants the rejects visible in Asana; default is report-only.
+- **5a (accepted):** one task per story in News Triage → **New Review** section, assignee + follower per "Required IDs", with the structured card (source, outlets covering, link, score, beat) followed by the **source summary + Wet Ink pitch embedded in `html_notes`** (see "ASANA TASK" for the format). No Google Doc. Staff then move it to **Approved** (taking it into their content timeline) or **Not Interested** (rejected — reviewed weekly).
+- **5b (not-summarized log):** record every NOT-summarized candidate — score-rejected (0–2), `already-covered` (with the existing post id/link), and `out-of-scope (evergreen — in-house)` — in the Phase 6 run report with one-line reasoning, so the rubric stays auditable and the same story isn't re-checked blindly next run. Do NOT file these as Asana cards (the bot's rejects are distinct from staff's "Not Interested" moves). Optionally maintain a single recurring "News Triage — Log" task in New Review if Andrew later wants the rejects visible in Asana; default is report-only.
 
-**Phase 6 — Run report.** Write `news-triage-<YYYY-MM-DD>.md` to `/Users/andrewnagle/Claude/Wet Ink Organic Social Posts/` summarizing: sources scanned, candidates found, scores, drafts written, Asana task links, not-drafted log (rejected / already-covered / out-of-scope with reasons), and anything needing manual attention.
+**Phase 5.5 — Social card (DESTINATION = `INSTAGRAM` only).** Stories routed `INSTAGRAM` never become articles, so they never get a hero image from anywhere else — this is the one destination with no other source of art. Generate a card and attach it to the task:
+
+```bash
+bin/wetink-card/wetink-card.sh "<short social headline>" <beat> "<subject brief>" <task_gid>
+```
+
+One command: it generates the art, composites the card, attaches it to the task, and prints the file path. (`make-card.sh` and `attach-card.sh` are the two halves underneath — call them directly only when debugging.)
+
+- `<beat>` is the story's Wet Ink category — `industry` (most law/platform news), `business`, `creators`, `features`, `galleries`, `side notes`. It sets the accent colour, and it should match the beat already recorded on the card.
+- `<subject brief>` is what the collage should *show* — one concrete physical object or scene, in plain words ("a battered filing cabinet with records spilling out", "a domestic wifi router with hand-inked signal arcs"). Concrete objects work; abstractions do not.
+- **Never brief a real person.** No likenesses, no recognisable faces — symbolic objects only. A fabricated photo of a named person is the one failure mode that costs the magazine credibility.
+- The headline on the card is a **short social headline**, not the source outlet's headline and not the eventual article title — 4–8 words, the hook first.
+- The card is a **draft for the editor**, same as everything else this desk files. Note it in the task as `Draft card — regenerate or replace as needed.`
+- `ARTICLE` and `BOTH` stories are **out of scope here** — those get their art from `content-pipeline`/Canva when the piece is built, and the editorial-only boundary otherwise holds.
+
+If `make-card.sh` fails (no Higgsfield credits, CLI missing, generation timeout), **file the task anyway without the card** and note the failure in the run report. The summary is the deliverable; the card is an addition, never a blocker.
+
+**What happens after this desk hands off.** `bin/wetink-card/card_scheduler.py` (hourly, launchd) schedules approved cards to @wetinkmag through `social-scheduler`. It only picks up a task once it is **in the Approved section AND carries a `CAPTION:` block** in its notes. That second gate is why this desk must keep writing `For the post` as bullets rather than finished copy — an editor writes the `CAPTION:` line, and an approved card without one is reported and skipped, never posted. Do not write a `CAPTION:` line from this desk. See `bin/wetink-card/README.md`.
+
+**Phase 6 — Run report.** Write `news-triage-<YYYY-MM-DD>.md` to `/Users/andrewnagle/Claude/Wet Ink Organic Social Posts/` summarizing: sources scanned, candidates found, scores, summaries filed, Asana task links, cards generated (or why not), not-summarized log (rejected / already-covered / out-of-scope with reasons), and anything needing manual attention.
 
 ---
 
 ## SOURCES (Phase 1)
 
-Scan all four tiers every run. Prefer each outlet's news index / RSS; fall back to a site-scoped web search (`site:avn.com`, etc.) for the trailing window.
+### Step 1 — ALWAYS start with the RSS pull (one command)
+
+```
+bin/news-feeds.sh --days 2        # or --days 7 on a weekly run
+```
+
+Full path: `/Users/andrewnagle/Documents/wet-ink-ops/bin/news-feeds.sh`
+
+Prints one TSV row per item — `DATE · SOURCE · TITLE · URL` — newest first, already filtered to the window. It pulls AVN (all articles + the dedicated legal feed), YNOT, and Google News queries covering XBIZ (which publishes no feed of its own), OnlyFans, Aylo/Pornhub, age verification, payments/debanking, platforms, and creator-labour. Run `--list` to see the exact feeds and queries.
+
+**Why this is step 1 and not optional:** the dates in this output are publisher-supplied `<pubDate>` values, so the freshness filter is arithmetic rather than a model reading a date off an index page. Reading dates off HTML indexes produced repeated stale-news near-misses — four stale stories presented as current in the 2026-07-21 run, and a 2022 Visa ruling nearly filed as breaking news on 2026-07-16. **Prefer a feed date over any date inferred from page text.**
+
+Two things the output demands of you:
+- Rows marked **`(via GNews)`** carry a Google redirect URL, **not a citable article URL.** Resolve the canonical link (search the headline + outlet) before quoting or linking. Never invent a URL.
+- The feed is a *lead list*, not a verdict. Court and legal candidates still require date-confirmation against the primary ruling or a dated outlet before drafting.
+
+### Step 2 — sweeps and the wider net
+
+Then run the keyword + breaking-news sweeps below to catch what the feeds miss. Prefer each outlet's news index / RSS; fall back to a site-scoped web search (`site:avn.com`, etc.) for the trailing window.
+
+**Fetching blocked outlets:** `theguardian.com` and `freespeechcoalition.com` return 400/403 to the WebFetch user agent but **200 to a normal browser UA** — they are not blocking Wet Ink, they are blocking that UA. Fetch them with `curl -L -A "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/126 Safari/537.36"` instead of giving up and crediting them second-hand. `courthousenews.com` returns 403 even with a browser UA — that one is a real block.
 
 **Lesson from reverse-engineering @swceosociety (2026-06-25):** a US-adult-trade-only net misses most of the best stories. SWCEO's grid sourced from European investigative outlets, statehouse nonprofits, international independent press, SW-movement media, and mainstream business/tech press — none of which AVN/XBIZ/YNOT carry. Cast the wide net below every run.
 
@@ -102,11 +149,16 @@ For each candidate capture: `headline`, `source`, `url` (canonical), `published_
 
 ### How to check
 
-The site is WordPress; use its public REST search endpoint (same source `content-pipeline` uses; cache-bust every call):
+Use the helper script — it wraps the site's public REST search endpoint (the same source `content-pipeline` uses) and cache-busts every call:
 
 ```
-https://wetinkmag.com/wp-json/wp/v2/posts?search=<TERM>&per_page=5&_fields=id,date,link,title&_cb=$(date +%s)
+bin/wetink-covered.sh "<TERM>" ["<TERM>" ...]
+# e.g. bin/wetink-covered.sh "Aylo" "Montreal" "Pornhub"
 ```
+
+Full path: `/Users/andrewnagle/Documents/wet-ink-ops/bin/wetink-covered.sh`
+
+**Call it via the script, never as a raw inline `curl`.** The old inline form embedded both the search term and a `$(date +%s)` cache-buster in the command string, so every call was a byte-different command that could never match a stored permission rule — a guaranteed approval prompt per story, per run. The script path is stable and is allow-listed once.
 
 For each accepted candidate:
 1. Pick its **2–4 most distinctive terms** — proper-noun entities and the event, NOT generic words. For the Aylo story: `Aylo`, `Montreal`, `Pornhub` ✅ — not `shooting`, `porn`, `industry` ❌ (those return unrelated posts).
@@ -136,59 +188,114 @@ Only in-scope stories scoring **3+** are drafted. Record the two sub-scores and 
 
 ---
 
-## DRAFT SPEC (Phase 3)
+## SUMMARY SPEC (Phase 3)
 
-This is a **news draft** — fast, current, publishable-soon coverage of an event, not an evergreen SEO article. Report the news in our own words, synthesize across the outlets covering it, link out, and add the Wet Ink angle. Speed and accuracy beat length.
+The deliverable is a **rich, structured source summary** — a fast, accurate brief that gives an editor everything they need to decide whether (and how) to cover the story, then write it themselves. It is NOT a finished article and NOT a 350–650-word original draft. Think of the detailed summary you'd give a colleague: what happened, the key facts and quotes, the context, and how the outlets covering it line up. Accuracy and synthesis beat length.
 
-Hard requirements:
-- **Voice:** invoke `wet-ink-voice` and follow its checklist. Flowing prose, insider authority, ≤2 em dashes, a proper noun per paragraph. Dry wit only where the subject allows — drop it entirely for deaths, violence, arrests, or other grim news.
-- **News shape:** lead with **what happened** (the actual news, not a "in a world where" windup), then **why it matters to the adult industry** — the Wet Ink angle the wires won't have. Keep it tight and current; this should read like it was written today because it was.
-- **Originality / attribution:** never paste source sentences. Attribute facts ("as XBIZ reported," "according to the filing," "first reported by…") and list every source URL in a **Sources** line at the bottom. When ≥2 outlets cover it, synthesize — and note the multi-outlet pickup, it's why we're covering it.
-- **Headline:** a clear, current news headline. One keyword-forward variant is welcome but optional — do NOT contort it into evergreen keyword-SEO. A short editorial H1 plus 1–3 subheads if the story needs them; subheads are optional for a short brief.
-- **Length:** **350–650 words** for a standard news brief. Bigger stories can run longer, but default short and fast. If a story is really an evergreen feature/guide, it does NOT belong here (see scope filter) — note it for the in-house track instead.
-- **Accuracy guardrails:** facts on a developing story are provisional — attribute, hedge where the reporting hedges, and never invent specifics (names, numbers, motive). If the story can't be confidently sourced (ideally to ≥2 outlets), file it as a pitch, not a drafted article.
-- **Front matter** in the card header (the structured block, not a Doc): `Beat:` (platform / law & money / people / industry) · `Suggested slug:` · `Angle:` · `Outlets covering:` · `Status: First draft (AI) — needs editor review; verify facts before publish`.
+**Multi-outlet synthesis is the core of the job.** A story that ≥2 outlets are covering must draw from ALL of them, not one. Read across the coverage, merge the facts, note where sources add different details or diverge, and link every one. Connecting the articles that mention the same story is a hard requirement, not a nicety — it's the whole reason this desk exists.
 
-The draft is a **fast first draft for a human editor to verify and finish**, not publish-ready. Say so in the status line. For developing/sensitive stories, flag it explicitly.
+Write each summary with these labeled sections (skip a section only if the story genuinely has nothing for it):
+
+- **Headline** — a clear, current news headline (`<h2>`). One keyword-forward variant is welcome but optional; do NOT contort it into evergreen keyword-SEO.
+- **Topline** — 1–2 sentences: the core of the story (who, what, when). This is the "if you read nothing else" line.
+- **What happened** — the key facts as a short bulleted list (use `<strong>` lead-ins or dashes; Asana allows no `<ul>`/`<li>`, so separate each point with a blank line and a leading `—`). Chronology or salience order. Attribute anything contested.
+- **Key quotes** — the notable on-the-record quotes, each with speaker + who reported it (`"…" — Name, via XBIZ`). Quote sparingly and exactly; never fabricate or paraphrase inside quotation marks.
+- **The bigger picture** — the context that makes it matter to the adult industry: the pattern it fits, the stakes, prior chapters of the story. Reported, not opinionated — save the take for the pitch.
+- **Across the coverage** — one short block explicitly connecting the outlets: who reported it first, what each adds, where they disagree, and the links. This is where "connect other articles about the same story" lives. If only one outlet has it, say so (single-source = weaker signal, note it).
+- **Wet Ink angle / pitch** — 1–2 sentences ONLY, in Wet Ink voice (invoke `wet-ink-voice`): the take/angle Wet Ink would bring that the wires won't have. This is the one place opinion and voice belong. Not a paragraph, not a draft — a pitch.
+
+Guardrails:
+- **Plain English (hard rule):** write the card so a busy editor gets it on one read. One idea per sentence; average ~15–20 words, hard cap ~30. Active voice, name the actor ("the DOJ nominated him," not "he was nominated"). Everyday words over insider or legal register — *say* "he wants prosecutors to charge porn sites," not "a federal prosecutorial theory aimed at distributors." Spell out any acronym or legal term on first use, in plain words, in the same sentence (`the Comstock Act — an 1873 law banning obscene material sent by mail`). No stacked subordinate clauses and no more than one em-dash aside per paragraph. This governs **every line the desk writes in its own words** — Topline, What happened, The bigger picture, Across the coverage, SEO angle, For the post, and the Wet Ink angle (voice, but still short and plain). It does NOT apply inside **Key quotes**: quotes stay exact, however they were phrased.
+- **Plain ≠ vague.** Simplifying is a wording change, never a content change. Keep every attribution, hedge, date, number and caveat — if a sentence gets long, split it in two rather than dropping the qualifier. "Nothing has been charged and he has not been confirmed" is plain already; don't cut it to save words.
+- **Attribution over invention:** attribute every fact ("as XBIZ reported," "according to the filing," "first reported by…"). Facts on a developing story are provisional — hedge where the reporting hedges, and never invent specifics (names, numbers, motive). If the story can't be confidently sourced (ideally to ≥2 outlets), file it as a thin summary flagged `single-source — needs verification`, not padded with guesses.
+- **Length:** scale to the story — most summaries land ~150–350 words plus the bullets. A huge story can run longer; a simple one shorter. Don't pad to hit a number.
+- **Sourcing/tone:** the summary body is neutral wire-style reporting. Dry Wet Ink wit belongs only in the one-line pitch, and never for deaths, violence, or arrests.
+- **Status:** every card carries `Status: AI source summary — verify facts before publish; editor writes the article.`
+
+The summary is **research for a human editor**, not publish-ready copy. Say so in the status line. For developing/sensitive stories, flag it explicitly.
 
 ---
 
 ## DELIVERY — embed-only (no Google Doc)
 
-The full draft goes **inside the Asana card** (`html_notes`), not a Google Doc. This is the default and the only supported path; do not create Drive files. (History: a Doc-based version existed but Drive's daily write quota is unreliable and the Doc added a click without adding value. If a Doc is ever wanted again, it's an explicit opt-in, not the default.)
+The summary + pitch goes **inside the Asana card** (`html_notes`), not a Google Doc. This is the default and the only supported path; do not create Drive files. (History: a Doc-based version existed but Drive's daily write quota is unreliable and the Doc added a click without adding value. If a Doc is ever wanted again, it's an explicit opt-in, not the default.)
 
 ---
 
 ## ASANA TASK (Phase 5a)
 
-Create one task per accepted draft via `create_tasks`:
+Create one task per accepted story via `create_tasks`:
 - `project_id` = News Triage project · `section_id` = **New Review**
 - `assignee` + `followers` per "Required IDs"
-- `name` = the news headline (no `[DRAFT]` prefix on the task itself)
+- `name` = the news headline (no prefix on the task itself)
 - `html_notes` = the structured card:
 
 ```
-SOURCE: <lead outlet>
-OUTLETS COVERING: <list the outlets — multi-outlet pickup is why we're covering it>
+SOURCE: <lead outlet — who reported it first / best>
+OUTLETS COVERING: <every outlet on the story — multi-outlet pickup is why we're covering it>
 LINK: <url(s)>
 SCORE: <0–5>  (news <n>/3 · relevance <n>/3)
 BEAT: <platform | law & money | people | industry>
-PITCH: <one line — what happened>
-ANGLE: <the Wet Ink take, 1–2 lines>
-REASONING: <why it scored where it did>
+DESTINATION: <ARTICLE | INSTAGRAM | BOTH>
+Search demand: <PROVEN | LIKELY | WEAK | NONE> (<n>/3)
+Social pull: <STRONG | WORKS | WEAK | NONE> (<n>/3)
+Why (not) an article: <1–2 plain sentences — is anyone searching for this, and how do we know?>
+Why (not) a social post: <1–2 plain sentences — does one fact carry it, or does it need setup?>
 ```
 
-Then, in the SAME `html_notes`, embed the **full draft** below the card (this replaces the old "DRAFT: <Doc link>" line). Use Asana-allowed tags only (`<h2>`, `<strong>`, `<em>`, `<hr/>`, `<a>`; separate paragraphs with blank lines — no `<p>`/`<br>`):
+**Always lead with the word, never a bare number.** `2/3` reads as 67% — a mediocre grade — to anyone who hasn't read the rubric, when in fact 2 is a PASS: the cut line on both axes is between 1 and 2, so 2 or 3 = do it, 0 or 1 = don't. Writing `Search demand: LIKELY (2/3)` says that; writing `SEO 2/3` says the opposite of what it means.
+
+The `DESTINATION` line comes from Phase 2.6 / the routing matrix in `rubric.md`. Where the SEO sub-score is 2–3, cite the Search Console evidence inline (e.g. `SEO 3/3 — 340 impressions / 12 clicks on age-verification queries, last 28d`); where it rests on cluster match alone, say that instead of implying data you didn't pull.
+
+**Both `Why` lines are mandatory on every card, in whichever direction the verdict went** — an editor needs the "why not" more than the "why", because it's what stops them spending a day on a piece nobody will search for. Write them for someone who has never heard the phrase "query cluster": say "nobody is searching for this yet — it's news, people don't know it happened", not "no standing cluster". Keep the numbers, but always attached to what they mean. The translation table in `rubric.md` ("Explaining the verdict to the team") is the reference — follow it.
+
+Then, in the SAME `html_notes`, embed the **source summary + pitch** below the card (this replaces the old draft embed). Use Asana-allowed tags only (`<h2>`, `<strong>`, `<em>`, `<hr/>`, `<a>`; separate paragraphs and bullet lines with blank lines — no `<p>`/`<br>`/`<ul>`/`<li>`, so write bullets as blank-line-separated lines each beginning with `—`):
 
 ```
-<hr/><h2><draft headline></h2><em>Fast news draft (AI). Verify facts before publish; editor review required. Flag sensitivity if any.</em>
+<hr/><h2><news headline></h2><em>AI source summary — verify facts before publish; editor writes the article. Flag sensitivity if any.</em>
 
-<full draft body — lead with what happened, then "Why this matters for the industry">
+<strong>Topline:</strong> <1–2 sentences: who/what/when.>
 
-<hr/><strong>Sources:</strong> <outlets>. — Auto-filed by news-triage; verify and finish before publish.
+<strong>What happened:</strong>
+
+— <key fact 1>
+
+— <key fact 2>
+
+— <key fact 3…>
+
+<strong>Key quotes:</strong>
+
+— "<exact quote>" — <Speaker>, via <outlet>
+
+<strong>The bigger picture:</strong> <context / stakes / prior chapters — reported, not opinion.>
+
+<strong>Across the coverage:</strong> <who broke it, what each outlet adds, where they diverge — with links: <a href="url">Outlet</a>, <a href="url">Outlet</a>.>
+
+<strong>Wet Ink angle:</strong> <1–2 sentences, Wet Ink voice — the take the wires won't have.>
+
+<hr/><strong>Sources:</strong> <linked outlets>. — Auto-filed by news-triage; verify facts before publish.
 ```
 
-Escape `&` as `&amp;` and keep it well-formed (single `<body>` root). See the filed examples (Pornhub/Apple age-verification; OnlyFans manager racket) for the exact shape.
+Then append the block(s) matching the DESTINATION — one, both, or neither:
+
+```
+<strong>SEO angle:</strong> <the exact words people would type into Google that this piece should come up for, plus what the search data actually showed — e.g. "Wet Ink appeared 340 times for 'age verification' in the last 28 days and got 12 clicks, so people are looking and we're not winning them", or plainly "we have no search data of our own here — this is based on similar topics". Suggest a search-friendly headline ONLY if it isn't a contortion.>
+
+<strong>For the post:</strong>
+
+— <the hook: the single number, quote or fact the graphic leads with>
+
+— <supporting fact 2>
+
+— <supporting fact 3, in the order they should land>
+
+<strong>Social discovery:</strong> <searchable terms or handles worth naming in the caption. SFW-safe on public channels.>
+```
+
+**`For the post` is bullets an editor writes from, not a finished caption.** Writing the actual post copy stays with `content-pipeline` — this desk hands over the facts and the hook, same as it hands over a summary rather than a finished article.
+
+Escape `&` as `&amp;` and keep it well-formed (single `<body>` root). Every outlet named in OUTLETS COVERING should appear as a link in "Across the coverage" and/or Sources — the connective tissue between the articles is the point.
 
 **Idempotency:** never create a task whose source URL or headline is already in the Phase 0 dedupe set. Search before creating.
 
@@ -212,4 +319,4 @@ Escape `&` as `&amp;` and keep it well-formed (single `<body>` root). See the fi
 - **Cadence:** built to run on demand now; intended to become a daily (≤48h window) or weekly (≤7d window) scheduled routine. The window is the only thing that changes between cadences.
 - **Why one task per story, capped at 3:** keeps writer load and token cost predictable, mirrors how content-pipeline processes one article per run.
 - **Dedupe is two-layer:** (1) the News Triage project itself (any existing task across New Review / Not Interested / Approved counts as already-triaged), and (2) the wetinkmag.com WP REST already-published check (Phase 2.5). The WP layer is the durable one — it survives even if Asana cards are moved or cleared.
-- **Failure rule:** if a draft can't be written confidently from available sources (paywall, too thin, single weak source), file the story as a *pitch* (New Review task, no Doc, status "needs research") instead of a fabricated draft. Never invent facts to fill a draft.
+- **Failure rule:** if a story can't be summarized confidently from available sources (paywall, too thin, single weak source), file a short summary flagged `single-source — needs verification` (New Review task, no Doc) rather than padding it with guesses. Never invent facts, names, numbers, or motive to fill a summary; hedge exactly where the reporting hedges.

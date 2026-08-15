@@ -10,6 +10,8 @@ description: >
   only mentions one article or asks about social content generally — the skill covers the
   complete carousel creation pipeline. Always use this skill before attempting to build
   Instagram carousels manually or using generate-design from scratch.
+  This skill builds the visual carousel in Canva; for caption/hashtag text only use
+  social-post-optimizer; for video use instagram-reels.
 ---
 
 ## ⚠️ PRE-FLIGHT CHECKLIST — READ BEFORE DOING ANYTHING
@@ -20,10 +22,12 @@ Before writing a single line of copy or making any API call, confirm all of the 
 - [ ] **Correct template** — Use `DAHHrgpO6aE`. Do not create carousels from scratch or use any other template.
 - [ ] **Move to folder after each commit** — Every completed carousel must be moved to `FAHILIV3D2w` using `Canva:move-item-to-folder`. This is not optional.
 - [ ] **Load `Canva:move-item-to-folder`** via `tool_search` before starting — it is a deferred tool.
-- [ ] **Create Asana task after carousel is done** — one task per carousel, assigned to Natasha, in "To Edit" section. Include Canva edit link. Add Holly as a contributor.
-- [ ] **Use the correct Canva URL format** — When sharing or storing a link to the new design, always construct it as `https://www.canva.com/design/{design_id}/edit` using `design.id` from the `merge-designs` response. Do NOT pass on the `urls.edit_url` field (the `https://www.canva.com/d/...` shortlink) — those open a different design and break the workflow for Natasha.
+- [ ] **Create Asana task after carousel is done** — one task per carousel, assigned to Jude, in "To Edit" section. Include Canva edit link. Add Holly as a contributor.
+- [ ] **Use the correct Canva URL format** — When sharing or storing a link to the new design, always construct it as `https://www.canva.com/design/{design_id}/edit` using `design.id` from the `merge-designs` response. Do NOT pass on the `urls.edit_url` field (the `https://www.canva.com/d/...` shortlink) — those open a different design and break the workflow for Jude.
 
 If any of the above is unclear, re-read the full skill before proceeding.
+
+> **Tool-name portability:** Tool names vary by surface — in Claude Code/agent mode use `ToolSearch` / `WebFetch` (instead of `tool_search` / `web_fetch`), and session-transcript search instead of `conversation_search`; Canva tools may be GUID-prefixed MCP names.
 
 ---
 
@@ -39,7 +43,7 @@ All carousels are published on Instagram, which throttles posts with explicit se
 
 - Replace explicit anatomical terms with euphemistic alternatives
 - Avoid specific sex acts, slurs, graphic body part references
-- Keep the Wet Ink voice — confident, insider, sharp — just route around the explicit stuff
+- Keep the Wet Ink voice — confident, insider, sharp — just route around the explicit stuff (full calibration: apply the wet-ink-voice skill)
 - If the article title is explicit, create a shortened/reframed cover title for the carousel
 
 For non-explicit articles, SFW is a non-issue — just write naturally in the Wet Ink voice.
@@ -49,41 +53,9 @@ For non-explicit articles, SFW is a non-issue — just write naturally in the We
 ## REQUIRED CANVA IDS
 
 - **Carousel template design:** `DAHHrgpO6aE` ("Copy of Carousel How to Regain Momentum and Reconnect with Your Audience")
-- **Wet Ink brand kit:** `kAHMSfM8ZjU` ("Wet Ink 2")
+- **Wet Ink brand kit:** `kAG8J_AhIkQ`
 - **Template structure:** 4 pages at 1080×1350 (Instagram portrait)
 - **Shared carousels folder:** `FAHILIV3D2w` ("Wet Ink - Instagram Carousels")
-
----
-
-## BRAND KIT — FONTS & COLORS
-
-The active brand kit is **Wet Ink 2** (`kAHMSfM8ZjU`). The template `DAHHrgpO6aE` is unchanged, but its styling should follow this kit. If you create or restyle any element, match these:
-
-**Fonts**
-- **Anton** — display/headline typeface. Use for the cover title (slide 1) and any strong headline moment. Do NOT use Anton for long-form or body copy.
-- **Barlow Condensed** — body, supporting copy, and captions (hook/payoff text on slides 2-3).
-
-**Primary colors**
-| Name | Hex |
-|---|---|
-| Hot pink | `#ff0f7b` |
-| Pink Dark | `#c8005a` |
-| Pink Light | `#ff69b4` |
-| Pink Pale | `#fff0f7` |
-| Black | `#0a0a0a` |
-| White | `#ffffff` |
-| Off White | `#f7f2f5` |
-
-**Secondary colors**
-| Name | Hex |
-|---|---|
-| Electric blue | `#0099ff` |
-| Acid green | `#00ff66` |
-| Neon purple | `#9933ff` |
-| Orange | `#ff6600` |
-| Yellow | `#ffe600` |
-
-> **Note:** The Canva MCP swaps text/image content but does not re-apply brand fonts or colors — those live on the template. If the template `DAHHrgpO6aE` has been refreshed to Wet Ink 2 in Canva, new carousels inherit the new look automatically. Use the values above only when manually styling a new element or flagging a mismatch to the user.
 
 ---
 
@@ -93,18 +65,25 @@ The active brand kit is **Wet Ink 2** (`kAHMSfM8ZjU`). The template `DAHHrgpO6aE
 - **"To Edit" section:** `1214264977347926`
 - **"Edited" section:** `1214265071278910`
 - **"Published" section:** `1214265072303679`
-- **Natasha (assignee):** `1213652591985519`
+- **Jude (assignee):** `1215070171246360`
 - **Holly Randall (contributor):** `1212147273860299`
+- **ArticleID custom field:** `1215162242710046` — set it on every carousel task to the article's **WordPress post id** (the pipeline's durable key; the caller passes it as `webflow_id` — legacy name, WP value). Without it the task is invisible to content-pipeline's ArticleID-based self-heal and preflight. If invoked standalone with no id available, resolve it via `https://wetinkmag.com/wp-json/wp/v2/posts?slug=<slug>` (take `id`), or omit with a logged warning. Do NOT invent a value.
+
+> **ID drift:** If any Asana call 404s, these IDs may have changed — verify against the live project and update BOTH instagram skills (instagram-reels duplicates this block).
 
 ---
 
 ## ARTICLE CONTENT SOURCES
 
-Article content for Wet Ink comes from two places:
+> **Not every social post has an article.** `news-triage` routes some stories `INSTAGRAM`-only — those never get written up, so there is no WP post, no post id and no hero image for this skill to pull. Those stories get a self-contained card generated by `bin/wetink-card/` at triage time and attached to their News Triage task; they do NOT come through here. If asked to build a carousel for a story with no published article, check whether it's an INSTAGRAM-only news card before trying to resolve an ArticleID — and do not invent one.
 
-1. **Past conversations** — Search conversation history using `conversation_search` for the article title, author, or topic. Look for: article title, summary text, bullet points, hero image URL (usually a Klaviyo CDN URL starting with `https://d3k81ch9hvuctc.cloudfront.net/company/SsnjrB/images/`).
+Article content for Wet Ink comes from these sources, in priority order:
+
+1. **WP REST API (primary)** — Fetch current articles from `https://wetinkmag.com/wp-json/wp/v2/posts?_embed&per_page=20` (add a `&_cb=<timestamp>` cache-buster — the CDN serves stale REST). Title, link (/posts/<slug>/ form), and featured image come back in one call.
 
 2. **User-provided** — The user may provide the article URL, title, summary, and/or image URL directly.
+
+3. **Past conversations (fallback)** — If the API and the user don't cover it, search conversation history using `conversation_search` for the article title, author, or topic. Look for: article title, summary text, bullet points, hero image URL (usually a Klaviyo CDN URL starting with `https://d3k81ch9hvuctc.cloudfront.net/company/SsnjrB/images/`).
 
 If the article URL is provided, fetch it with `web_fetch` to extract content. If the image URL is not available, ask the user to provide one.
 
@@ -120,7 +99,7 @@ Collect the following for the target article:
 - **Summary/key point** (1-2 sentences for slide 3 — the article's core argument or payoff)
 - **Hero image URL** (used on slides 1 and 4)
 
-Use `conversation_search` to find article details from the Issue #5 newsletter build or other past conversations. The newsletter-content skill workflow produces summaries and bullets that work well as carousel text.
+Fetch current articles from the WP REST API: `https://wetinkmag.com/wp-json/wp/v2/posts?_embed&per_page=20` (add a `&_cb=<timestamp>` cache-buster — the CDN serves stale REST). Title, link (/posts/<slug>/ form), and featured image come back in one call.
 
 ### Step 2: Load Canva Tools
 
@@ -132,7 +111,7 @@ Search for and load the following Canva tools (they are deferred and must be loa
 - `Canva:commit-editing-transaction` — to save changes
 - `Canva:get-design-thumbnail` — to preview slides
 - `Canva:move-item-to-folder` — to move each completed design to the shared folder
-- `Asana:create_tasks` — to create editing tasks for Holly (load via `tool_search` query "create tasks")
+- `Asana:create_tasks` — to create editing tasks for Jude (load via `tool_search` query "create tasks")
 
 **Important:** Load these tools early in the conversation before they cycle out of context.
 
@@ -219,7 +198,7 @@ Canva:move-item-to-folder
 
 Provide the user with the Canva edit URL constructed as `https://www.canva.com/design/{design_id}/edit` using the `design.id` returned by `merge-designs` (e.g. `https://www.canva.com/design/DAHJCJsTxxU/edit`).
 
-**Do NOT use `urls.edit_url` from the merge-designs response.** That field returns a `https://www.canva.com/d/...` shortlink that opens a different design — likely a new draft Canva spawned for the share flow rather than the design that was actually edited. Sharing that link with Natasha breaks the workflow because the text and image swaps live on the `design.id` design, not the shortlink target.
+**Do NOT use `urls.edit_url` from the merge-designs response.** That field returns a `https://www.canva.com/d/...` shortlink that opens a different design — likely a new draft Canva spawned for the share flow rather than the design that was actually edited. Sharing that link with Jude breaks the workflow because the text and image swaps live on the `design.id` design, not the shortlink target.
 
 The same rule applies anywhere a Canva link gets surfaced: in chat to the user, in the Asana task notes, or anywhere else. Always build it from `design.id`.
 
@@ -237,7 +216,7 @@ The same rule applies anywhere a Canva link gets surfaced: in chat to the user, 
 
 ### Step 7: Create Asana Task
 
-After the carousel is committed, create an Asana task in the "To Edit" section of the Wet Ink Social Media project, assigned to Natasha, with Holly Randall added as a contributor.
+After the carousel is committed, create an Asana task in the "To Edit" section of the Wet Ink Social Media project, assigned to Jude, with Holly Randall added as a contributor.
 
 Use `Asana:create_tasks` (load via `tool_search` if needed) with:
 
@@ -247,14 +226,19 @@ tasks: [
   {
     name: "[Article Title] — Instagram Carousel",
     notes: "Edit text and images as needed.\n\nCanva link: https://www.canva.com/design/[design_id]/edit\n\nArticle: [article title]",
-    assignee: "1213652591985519",
+    assignee: "1215070171246360",
     section_id: "1214264977347926",
-    followers: "me,1212147273860299"
+    followers: "me,1212147273860299",
+    custom_fields: '{"1215162242710046":"<webflow_id>"}'
   }
 ]
 ```
 
-**Important:** Include the Canva edit link in the task description so Natasha can go straight to it. Build the link as `https://www.canva.com/design/{design_id}/edit` from `design.id` — never paste in `urls.edit_url` (the `/d/...` shortlink), since that opens a different design. Add the user (Andrew) and Holly Randall as followers on each task.
+**Important:** Include the Canva edit link in the task description so Jude can go straight to it. Build the link as `https://www.canva.com/design/{design_id}/edit` from `design.id` — never paste in `urls.edit_url` (the `/d/...` shortlink), since that opens a different design. Add the user (Andrew) and Holly Randall as followers on each task.
+
+### Step 8: Caption Handoff
+
+Generate the caption + first-comment hashtags using the social-post-optimizer skill (Instagram block only) and paste into the Asana task notes.
 
 ---
 
@@ -265,7 +249,7 @@ tasks: [
 - **Slide 3 (Payoff):** The article's core argument or what the reader will learn. 1-2 sentences.
 - **Slide 4 (CTA):** Don't change — template already has "read the full article on WETINKMAG.COM."
 
-Write in the Wet Ink editorial voice: direct, confident, industry-insider. No outsider framing.
+Write in the Wet Ink editorial voice: direct, confident, industry-insider. No outsider framing. (Full calibration: apply the wet-ink-voice skill.)
 
 ---
 
@@ -281,74 +265,19 @@ To create carousels for multiple articles:
 1. Gather all article content first
 2. Upload all images to Canva
 3. Create each carousel sequentially (duplicate → edit → commit → move to folder)
-4. Create Asana tasks for all completed carousels (one task per carousel, assigned to Natasha, with Holly as contributor)
+4. Create Asana tasks for all completed carousels (one task per carousel, assigned to Jude, with Holly as contributor)
 5. Provide all Canva links at the end
 
 **Important:** In long conversations, Canva tools may cycle out of context. If tools become unavailable, suggest the user start a fresh chat with the article details pre-loaded.
 
 ---
 
-## ISSUE #5 ARTICLE REFERENCE
+## ARTICLE REFERENCE
 
-These are the articles from the most recent Wet Ink issue for quick reference:
-
-1. **How to Become a Pornstar: A Beginner's Guide** — by Ophelia Fae
-   - Image: `https://d3k81ch9hvuctc.cloudfront.net/company/SsnjrB/images/455a7edf-e8e7-4c3b-a8fb-41abbba89c67.jpeg`
-
-2. **Homeless and Pregnant at 17: Isis Love's Origin Story** — 27-year career
-   - Image: `https://d3k81ch9hvuctc.cloudfront.net/company/SsnjrB/images/1a947944-7110-4b0a-9e1c-f2f703daebb2.jpeg`
-
-3. **The U.K. Wants to Ban Step-Family Porn** — legislative breakdown
-   - Image: `https://d3k81ch9hvuctc.cloudfront.net/company/SsnjrB/images/2867633a-5a2e-4b22-946b-5dc836b95be9.jpeg`
-
-4. **Deconstructing the Whorearchy** — by Jude D. Grey
-   - Image: `https://d3k81ch9hvuctc.cloudfront.net/company/SsnjrB/images/e3828623-b19a-45a6-94c9-30ab60ff73ba.jpeg`
-
-5. **AVN & XMA Red Carpet** — photo gallery (no single hero image)
+Fetch current articles from the WP REST API: `https://wetinkmag.com/wp-json/wp/v2/posts?_embed&per_page=20` (add a `&_cb=<timestamp>` cache-buster — the CDN serves stale REST). Title, link (/posts/<slug>/ form), and featured image come back in one call.
 
 ---
 
 ## WORKED EXAMPLES
 
-These examples show the exact text used on completed carousels. Use them to calibrate tone, length, and voice.
-
-### Example 1: How to Regain Momentum and Reconnect with Your Audience
-
-- **Canva design:** `DAHHrgpO6aE`
-- **Article:** Business/strategy piece on camming and fan club crossover
-
-| Slide | Content |
-|-------|---------|
-| 1 (Cover) | How to Regain Momentum and Reconnect with Your Audience |
-| 2 (Hook) | There's something important in our industry that people often miss: the close relationship between camming and subscription-based fan clubs. Let's take a quick look at how this relationship began. |
-| 3 (Payoff) | Cam platforms introduced subscription-based fan clubs so models could earn money even when they weren't live. |
-| 4 (CTA) | read the full article on WETINKMAG.COM |
-
-### Example 2: Homeless and Pregnant at 17 — Isis Love's Origin Story
-
-- **Canva design:** `DAHHroS8OUU`
-- **Article:** Career profile — 27-year adult industry veteran
-
-| Slide | Content |
-|-------|---------|
-| 1 (Cover) | Homeless and Pregnant at 17: Isis Love's Origin Story |
-| 2 (Hook) | Before the 27-year career, before XXX Tryouts, before any of it — Isis Love was seventeen, pregnant, and sleeping under train tracks in Berkeley. She worked 13 jobs just to survive. |
-| 3 (Payoff) | We traced her path from a laundromat pay phone to one of the longest-running careers in adult entertainment — and the financial discipline that made it possible. |
-| 4 (CTA) | read the full article on WETINKMAG.COM |
-
-### Example 3: The U.K. Wants to Ban Step-Family Porn
-
-- **Article:** Legislative breakdown of the U.K. Crime and Policing Bill
-
-| Slide | Content |
-|-------|---------|
-| 1 (Cover) | The U.K. Wants to Ban Step-Family Porn |
-| 2 (Hook) | The U.K.'s Crime and Policing Bill would ban step-family content and adult roleplay simulating minors — without defining what any of those terms actually mean. |
-| 3 (Payoff) | Critics warn the vague wording invites case-by-case enforcement and liability-driven platform over-compliance, echoing the fallout from FOSTA-SESTA in the United States. |
-| 4 (CTA) | read the full article on WETINKMAG.COM |
-
-**Voice notes from these examples:**
-- Slide 2 leads with the single most compelling hook — the detail that makes someone stop scrolling.
-- Slide 3 pulls back to the article's broader argument or significance.
-- Tone is direct, insider, never explanatory. "We traced her path" not "This article traces her path."
-- SFW is maintained throughout — no explicit language even on articles with explicit titles.
+Read `references/examples.md` before drafting slide text — it shows the exact slide-by-slide text from three completed carousels for calibrating tone, length, and voice.

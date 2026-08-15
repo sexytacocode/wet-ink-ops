@@ -494,6 +494,87 @@ async function lookupByWebflowId(sheets, spreadsheetId, body) {
   return { ok: false, error: 'not found' };
 }
 
+// ---------------------------------------------------------------------------
+// WordPress REST proxy
+//
+// wetinkmag.com is blocked by the CCR sandbox egress proxy, so the cloud
+// routine cannot read the WP REST API directly. These two actions fetch it
+// server-side and return a TRIMMED payload: the raw `_embed=1` response for 30
+// posts is ~280KB, which overflows the agent's tool-result token cap. Keep the
+// list lean (detection only) and fetch one full post at a time to build from.
+// ---------------------------------------------------------------------------
+
+const WP_API = 'https://wetinkmag.com/wp-json/wp/v2';
+
+function decodeEntities(s) {
+  return String(s || '')
+    .replace(/&#(\d+);/g, (_, d) => String.fromCharCode(Number(d)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&');
+}
+
+function summarise(post) {
+  const embedded = post._embedded || {};
+  const media = (embedded['wp:featuredmedia'] || [])[0] || {};
+  const term = ((embedded['wp:term'] || [])[0] || [])[0] || {};
+  return {
+    wp_id: post.id,
+    slug: post.slug,
+    link: post.link,
+    date: post.date,
+    title: decodeEntities(post.title && post.title.rendered),
+    category: term.name || '',
+    featured_image: media.source_url || '',
+  };
+}
+
+// Featured image first, then inline body images. Only /wp-content/uploads/ —
+// never the dead cdn.prod.website-files.com (Webflow) host.
+function imageUrls(post) {
+  const media = ((post._embedded || {})['wp:featuredmedia'] || [])[0] || {};
+  const html = (post.content && post.content.rendered) || '';
+  const found = [];
+  const re = /<img[^>]+src=["']([^"']+)["']/gi;
+  let m;
+  // src attributes arrive HTML-escaped (`&#038;` for `&`) — decode or the
+  // Photon query string breaks when the URL is fetched.
+  while ((m = re.exec(html)) !== null) found.push(decodeEntities(m[1]));
+  return [media.source_url, ...found]
+    .filter((u) => u && u.includes('/wp-content/uploads/'))
+    .filter((u, i, a) => a.indexOf(u) === i);
+}
+
+async function wpFetch(path) {
+  // Cache-bust: the a8c CDN serves stale REST responses.
+  const sep = path.includes('?') ? '&' : '?';
+  const resp = await fetch(`${WP_API}${path}${sep}_cb=${Date.now()}`, {
+    headers: { 'User-Agent': 'wet-ink-ops-webhook' },
+  });
+  if (!resp.ok) throw new Error(`WP REST ${resp.status} on ${path}`);
+  return resp.json();
+}
+
+async function listPosts(body) {
+  const perPage = Math.min(Math.max(Number(body.per_page) || 30, 1), 100);
+  const posts = await wpFetch(`/posts?per_page=${perPage}&_embed=1&orderby=date&order=desc`);
+  return { ok: true, action: 'list_posts', count: posts.length, posts: posts.map(summarise) };
+}
+
+async function getPost(body) {
+  const wpId = Number(body.wp_id);
+  if (!wpId) return { ok: false, error: 'get_post requires wp_id' };
+  const post = await wpFetch(`/posts/${wpId}?_embed=1`);
+  return {
+    ok: true,
+    action: 'get_post',
+    ...summarise(post),
+    images: imageUrls(post),
+    content_html: (post.content && post.content.rendered) || '',
+  };
+}
+
 module.exports = async function handler(req, res) {
   // CORS / preflight — harmless to allow
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -523,7 +604,7 @@ module.exports = async function handler(req, res) {
     }
     providedSecret = url.searchParams.get('secret') || '';
     body.action = action;
-    for (const k of ['title', 'date', 'row', 'value', 'webflow_id']) {
+    for (const k of ['title', 'date', 'row', 'value', 'webflow_id', 'wp_id', 'per_page']) {
       if (url.searchParams.has(k)) body[k] = url.searchParams.get(k);
     }
     if (body.row !== undefined) body.row = Number(body.row);
@@ -534,6 +615,21 @@ module.exports = async function handler(req, res) {
   // Shared-secret check (applies to both POST header and GET query)
   if (secret && providedSecret !== secret) {
     return res.status(401).json({ ok: false, error: 'unauthorized' });
+  }
+
+  // WordPress proxy actions run before the Sheets env checks — they touch no
+  // spreadsheet. The CCR sandbox blocks wetinkmag.com outright (EGRESS_BLOCKED),
+  // so the cloud routine cannot call the WP REST API itself; this webhook is
+  // already on its allowlist, so it fetches on the routine's behalf.
+  if (body.action === 'list_posts' || body.action === 'get_post') {
+    try {
+      const result = body.action === 'list_posts'
+        ? await listPosts(body)
+        : await getPost(body);
+      return res.status(result.ok ? 200 : 400).json(result);
+    } catch (err) {
+      return res.status(502).json({ ok: false, error: String(err && err.message ? err.message : err) });
+    }
   }
 
   const spreadsheetId = process.env.SPREADSHEET_ID;

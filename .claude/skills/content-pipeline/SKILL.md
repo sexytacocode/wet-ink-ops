@@ -19,8 +19,8 @@ description: >
 
 - [ ] **bash / curl / python3 available** — Used to pull posts from the WordPress REST API, parse JSON, and POST to the tracker webhook.
 - [ ] **Tracker webhook reachable** — Sheet reads AND writes go to `https://wet-ink-ops.vercel.app/api/webhook` (Vercel-hosted serverless function in this same repo, at `api/webhook.js`). Requires the `WEBHOOK_SECRET` env var. For local testing, pull it from Vercel with `vercel env pull .env.local && export $(grep WEBHOOK_SECRET .env.local | xargs)`. The webhook handles all sheet I/O — no Google Drive MCP, no Chrome MCP, no Apps Script. Works headlessly so the daily scheduled routine doesn't need a laptop awake or any Google connector at all.
-- [ ] **Asana MCP loaded** — Used by Phase 1.5 preflight check and Phase 4 task creation. Load via `tool_search` query `"asana"`.
-- [ ] **Subagent: `reel-image-reviewer`** — Defined at `.claude/agents/reel-image-reviewer.md`. Required for the Phase 3 gate. If unavailable (e.g. running in Claude Desktop), see "Desktop fallback" below.
+- [ ] **Asana MCP loaded** — Used by Phase 1.5 preflight check and Phase 4 task creation. Load via `tool_search` (in Claude Code the equivalent tool is `ToolSearch`) query `"asana"`.
+- [ ] **Subagent: `reel-image-reviewer`** — Defined at `/Users/andrewnagle/Documents/wet-ink-ops/.claude/agents/reel-image-reviewer.md`. Required for the Phase 3 gate. If unavailable (e.g. running in Claude Desktop), see "Desktop fallback" below.
 - [ ] **Skills referenced** — `instagram-reels`, `instagram-carousel`, `wet-ink-voice`, `social-post-optimizer`. Do not duplicate their rules in this skill; read them when invoked. Every article gets a carousel built alongside its Reels (no cycle gating).
 
 ---
@@ -29,7 +29,7 @@ description: >
 
 This skill does NOT restate Canva template IDs, Asana assignee IDs, brand kit IDs, or any operational specific that belongs to a downstream skill. Those drift. Always read them from:
 
-- `instagram-reels` SKILL.md — Reel template, brand kit, Reel folder, Social Media project ID, "To Edit" section, assignee (Natasha) and collaborator (Holly) IDs
+- `instagram-reels` SKILL.md — Reel template, brand kit, Reel folder, Social Media project ID, "To Edit" section, assignee (Jude D. Grey) and collaborator (Holly) IDs
 - `instagram-carousel` SKILL.md — carousel template, carousel folder, carousel-specific QA rules
 - `social-post-optimizer` SKILL.md — platform-specific caption rules and limits
 - `wet-ink-voice` SKILL.md — voice rules
@@ -47,6 +47,21 @@ Only IDs unique to THIS skill live in the "Required IDs" section below.
 - **Images now live on `https://wetinkmag.com/wp-content/uploads/...`** — never `cdn.prod.website-files.com`.
 - **⚠️ a8c CDN serves stale REST.** Always cache-bust the REST call with a unique query param, e.g. append `&_cb=$(date +%s)` to every `wp-json` URL, or the response may lag the live site by minutes.
 
+### ⚠️ Running in the cloud (CCR routine): wetinkmag.com is EGRESS-BLOCKED
+
+The CCR sandbox blocks outbound requests to `wetinkmag.com` — both `WebFetch` and Bash `curl` fail with `EGRESS_BLOCKED`. **Do not fall back to Webflow when this happens.** The Webflow CMS is dead and frozen; falling back to it silently reports "0 new articles" forever.
+
+Instead, read WordPress through the tracker webhook, which is already on the sandbox allowlist and proxies the REST API server-side:
+
+| Direct (local runs only) | Via webhook (cloud runs) |
+|---|---|
+| `GET /wp-json/wp/v2/posts?per_page=30&_embed=1` | `?action=list_posts&per_page=30` |
+| `GET /wp-json/wp/v2/posts/<wp_id>?_embed=1` | `?action=get_post&wp_id=<wp_id>` |
+
+`list_posts` returns a trimmed array (`wp_id`, `slug`, `link`, `date`, `title` — already entity-decoded — `category`, `featured_image`). `get_post` adds `images[]` (featured first, then body images, all `/wp-content/uploads/`, entity-decoded and ready to fetch) and `content_html`.
+
+**Both are deliberately trimmed.** The raw `_embed=1` response for 30 posts is ~280KB and overflows the agent tool-result token cap — that is what killed earlier cloud runs. Never ask the webhook for raw REST.
+
 ### The durable key is now the WordPress post id (legacy field name retained)
 
 The pipeline's durable unique key — threaded through tracker column L, the Asana `ArticleID` custom field, and every preflight/self-heal/verify match — **is now the WordPress post `id`** (an integer like `1305`), NOT a Webflow CMS item id.
@@ -55,6 +70,30 @@ The pipeline's durable unique key — threaded through tracker column L, the Asa
 - The webhook field/param `webflow_id`, the actions `set_webflow_id` / `lookup_by_webflow_id`, and tracker **column L "Webflow ID"** all still exist under those literal names — **but the value they hold is the WordPress post id.**
 - When you read `row.webflow_id` or pass `"webflow_id": ...`, you are reading/writing a WP post id. Treat "webflow_id" purely as the opaque key's storage name; its meaning is "WP post id".
 - **Old rows** (built during the Webflow era) keep their now-inert Webflow CMS ids in column L; their Asana `ArticleID` holds the same old id, so they still match each other. **New rows** get WP post ids in both places. Both generations are internally consistent — never try to reconcile a Webflow id against a WP id.
+
+---
+
+## ⛔ CRITICAL — REEL MODE (READ BEFORE PHASE 2 AND PHASE 4)
+
+`instagram-reels` carries a **MODE flag** that governs how many Reel versions exist.
+**Read that flag at the top of `instagram-reels/SKILL.md` before every build and obey it.**
+It is the single source of truth for the Reel count — this file must never hard-code it.
+
+**Current mode (2026-06, re-confirmed 2026-07-21): `UNCENSORED_ONLY`.**
+
+Under UNCENSORED_ONLY the per-article output is **2 pieces, not 3**:
+- **1 Long Uncensored Reel** — no SFW version, no SFW task
+- **1 Instagram Carousel** — unchanged; every article still gets one
+
+So wherever this skill says "Uncensored + SFW", "Two Reel tasks", "2 Reels", or **N = 3**,
+read it as **N = 2** (Uncensored Reel + Carousel) while the flag is UNCENSORED_ONLY. Under
+DUAL_VERSION the 3-task wording applies as written.
+
+> **Why this block exists.** The UNCENSORED_ONLY flag was set in June 2026 in `instagram-reels`,
+> but this orchestrator was never updated and kept instructing the Reel subagent to "produce
+> Uncensored + SFW Reel designs" and to create 3 tasks. Because the orchestrator overrides the
+> sub-skill, the policy silently never took effect through the pipeline — on 2026-07-21 it built
+> 5 unwanted SFW reels across 5 articles. Never hard-code the version count here again.
 
 ---
 
@@ -93,7 +132,7 @@ Pick the **target article** for this run — defined as the tracker row with the
 
 **Phase 2 — Build (parallel subagents, only if Phase 1.5 says proceed)**
 For the target article from Phase 1.5, fan out subagents simultaneously from the same article inputs:
-- **Reel subagent** — invokes `instagram-reels` (which pulls `wet-ink-voice` for on-design copy). Produces Uncensored + SFW Reel designs and returns the list of uploaded `asset_ids` (one per article image) plus the per-scene assignment.
+- **Reel subagent** — invokes `instagram-reels` (which pulls `wet-ink-voice` for on-design copy). Produces **however many Reel versions that skill's MODE flag dictates** — under the current `UNCENSORED_ONLY` that is the **Uncensored Reel only**; under `DUAL_VERSION` it is Uncensored + SFW. Returns the list of uploaded `asset_ids` (one per article image) plus the per-scene assignment.
 - **Caption subagent** — invokes `social-post-optimizer` + `wet-ink-voice`. Produces Instagram caption, hashtags, and X/Twitter copy (both Uncensored and SFW).
 - **Carousel subagent** (always spawned) — invokes `instagram-carousel`. Produces one SFW carousel design with text + images swapped from the article. Carousels don't have Uncensored versions (Instagram throttles explicit content).
 
@@ -159,6 +198,8 @@ The Vercel-hosted webhook (`api/webhook.js` in this repo) handles all sheet writ
 | `set_webflow_id` | `{"action":"set_webflow_id", "title":"...", "webflow_id":"<id>"}` OR `{"action":"set_webflow_id", "row":N, "webflow_id":"<id>"}` | `{ok:true, row, webflow_id}` — writes column L. Used by the backfill to populate the Webflow ID for rows that predate the column. |
 | `lookup_by_webflow_id` | `{"action":"lookup_by_webflow_id", "webflow_id":"<id>"}` | `{ok:true, row, num, title, date, in_asana, carousel, webflow_id}` — returns the matching row, or 404 `{ok:false, error:"not found"}`. |
 | `init_columns` | `{"action":"init_columns"}` | `{ok:true, written:"L1=Webflow ID"}` or `{ok:true, skipped:true}` if L1 already says `Webflow ID`. One-shot init of the column header — already run, listed here for documentation. |
+| `list_posts` | `{"action":"list_posts", "per_page":30}` | `{ok:true, count:N, posts:[{wp_id, slug, link, date, title, category, featured_image}, ...]}` — WordPress REST proxy, newest first. Titles are already entity-decoded. `per_page` defaults to 30, clamped 1–100. **Touches no spreadsheet.** |
+| `get_post` | `{"action":"get_post", "wp_id":2711}` | `{ok:true, wp_id, slug, link, date, title, category, featured_image, images:[...], content_html}` — one full article. `images` is featured-first, `/wp-content/uploads/` only, entity-decoded. 400 if `wp_id` is missing, 502 if WordPress is unreachable. |
 | `delete_row` | `{"action":"delete_row", "row":N}` | `{ok:true, deleted_row:N}` — one-off cleanup; shifts all rows below up by 1 |
 
 The `append` action auto-computes `#` (max existing + 1), fills the 12 default columns (`Posted on IG?`=N, `Create Post?`=Y, `New Post Type`=Reel, `In Asana`=N, `Carousel`=N, `Webflow ID`=passed value or empty), and inherits formatting from the article row above (cell colors, dropdowns, conditional formatting).
@@ -170,6 +211,16 @@ The `append` action auto-computes `#` (max existing + 1), fills the 12 default c
 ### Step 1: Pull recent posts from the WordPress REST API
 
 One cache-busted REST call returns everything Phase 1 needs — there is **no separate scrape and no separate id-lookup step** anymore (the REST response carries the post id directly).
+
+**Cloud runs (CCR routine) — use the webhook proxy.** `wetinkmag.com` is egress-blocked in the sandbox, so call the webhook via `mcp__Vercel__web_fetch_vercel_url`:
+
+```
+https://wet-ink-ops.vercel.app/api/webhook?action=list_posts&per_page=30&secret=$WEBHOOK_SECRET
+```
+
+That returns `posts:[{wp_id, slug, link, date, title, category, featured_image}]` — already parsed and entity-decoded, so skip straight to the diff below. **If this call fails, stop and report it. Do NOT fall back to Webflow** — the Webflow CMS is frozen and will silently report zero new articles.
+
+**Local runs** can hit the REST API directly:
 
 ```bash
 CB=$(date +%s)   # cache-bust: a8c CDN serves stale REST
@@ -358,7 +409,7 @@ Each iteration is independent — Phase 1 is NOT re-run within the loop (already
 
 ### Step 5.5c: Search Asana by ArticleID custom field
 
-Load Asana MCP via `tool_search` query `"asana search tasks"`, then search the Wet Ink Social Media project by the **ArticleID custom field** (GID `1215162242710046`) equal to the target row's `webflow_id`:
+Load Asana MCP via `tool_search` (in Claude Code: `ToolSearch`) query `"asana search tasks"`, then search the Wet Ink Social Media project by the **ArticleID custom field** (GID `1215162242710046`) equal to the target row's `webflow_id`:
 
 ```
 mcp__asana__search_tasks:
@@ -373,7 +424,7 @@ mcp__asana__search_tasks:
 **Why custom-field search and not title search:** titles are fragile. Post edits in WordPress, curly-quote drift, and partial-substring false positives caused the original failure mode this whole change was designed to fix. The ArticleID custom field is the durable unique key.
 
 **Match interpretation** (carousel is always expected on new builds — see Step 5.5b):
-- **3 matches** → **Asana has the full set** (Uncensored + SFW + Carousel). Treat as "skipped-built-already" and route to Phase 4 Step 11.
+- **Full set present** → under `UNCENSORED_ONLY` that is **2 matches** (Uncensored Reel + Carousel); under `DUAL_VERSION` it is 3 (Uncensored + SFW + Carousel). Treat as "skipped-built-already" and route to Phase 4 Step 11. Pre-2026-07-21 rows may carry a legacy SFW task — that is not a gap to refill.
 - **2 matches on a historical row** (where column K Carousel == "N") → also counts as "Asana has it" for cycle-era articles that never got a carousel. Don't retroactively build one. Route to Phase 4 Step 11.
 - **1 or 2 matches on a new-era row** → **partial-built**. The pipeline crashed mid-Phase-4 in a previous run. Treat as "needs build" so Phase 2-4 fires and the verify step (Phase 4 Step 10.5) creates the missing task(s). Phase 4 Step 10 task creation should idempotently skip the already-existing ones (search again right before each create).
 - **0 matches** → **needs build** (normal path).
@@ -422,6 +473,16 @@ The decision and reasoning must appear in the Phase 4 final report so it's clear
 ### Step 6: Fetch article content
 
 For the **target article** identified in Phase 1.5 Step 5.5, fetch the full post from the WordPress REST API by id (you already have `wp_id` from Phase 1; it's the value stored as the row's `webflow_id`):
+
+**Cloud runs** — via `mcp__Vercel__web_fetch_vercel_url`:
+
+```
+https://wet-ink-ops.vercel.app/api/webhook?action=get_post&wp_id=<wp_id>&secret=$WEBHOOK_SECRET
+```
+
+This returns `images[]` already built to the rules below (featured first, `/wp-content/uploads/` only, entity-decoded) plus `content_html` — use `images` directly as `article_image_urls`.
+
+**Local runs:**
 
 ```bash
 CB=$(date +%s)
@@ -491,8 +552,9 @@ Spawn both at the same time. They have no dependency on each other.
 **Reel subagent prompt:**
 
 ```
-Read .claude/skills/instagram-reels/SKILL.md and execute it end to end
-for this article:
+Read /Users/andrewnagle/Documents/wet-ink-ops/.claude/skills/instagram-reels/SKILL.md
+(or invoke the instagram-reels skill by name if the path is unavailable)
+and execute it end to end for this article:
 
 Title: {title}
 Body excerpt: {body_excerpt}
@@ -528,8 +590,10 @@ Do NOT create Asana tasks. That happens in Phase 4 of the parent pipeline.
 **Caption subagent prompt:**
 
 ```
-Read .claude/skills/social-post-optimizer/SKILL.md and
-.claude/skills/wet-ink-voice/SKILL.md.
+Read /Users/andrewnagle/Documents/wet-ink-ops/.claude/skills/social-post-optimizer/SKILL.md and
+/Users/andrewnagle/Documents/wet-ink-ops/.claude/skills/wet-ink-voice/SKILL.md
+(or invoke the social-post-optimizer / wet-ink-voice skills by name if
+the paths are unavailable).
 
 Produce platform copy for this article:
 
@@ -552,8 +616,9 @@ Do NOT post anything. Output text only.
 **Carousel subagent prompt** (always spawn — every article gets a carousel):
 
 ```
-Read .claude/skills/instagram-carousel/SKILL.md and execute it end to end
-for this article:
+Read /Users/andrewnagle/Documents/wet-ink-ops/.claude/skills/instagram-carousel/SKILL.md
+(or invoke the instagram-carousel skill by name if the path is unavailable)
+and execute it end to end for this article:
 
 Title: {title}
 Body excerpt: {body_excerpt}
@@ -635,7 +700,7 @@ Build `existing_names = set of returned task names`. Compute `planned_names = {"
 This pre-check catches: (a) Phase 1.5 routed to "partial-built" path so some tasks exist; (b) a previous run crashed mid-Step-10; (c) any retry scenario. Never create a duplicate.
 
 **Step 10b — Create:**
-- **Two Reel tasks** — Uncensored + SFW. Per the existing template below.
+- **Reel task(s)** — per the `instagram-reels` MODE flag: **one Uncensored task** under `UNCENSORED_ONLY` (current), or Uncensored + SFW under `DUAL_VERSION`. Per the existing template below.
 - **One Carousel task** — always (every article gets a carousel). Single SFW carousel; no Uncensored version.
 
 Only include tasks whose names are in `tasks_to_create`.
@@ -696,7 +761,7 @@ mcp__asana__search_tasks
 ```
 
 **Expected count:**
-- N = **3** for every fresh build (Uncensored + SFW + Carousel — carousels are now built for every article).
+- N = **2** for every fresh build under the current `UNCENSORED_ONLY` mode (Uncensored Reel + Carousel — carousels are built for every article). N = **3** only under `DUAL_VERSION` (Uncensored + SFW + Carousel). Read the MODE flag; never assume.
 
 **If actual count != expected:** save a FAIL report to `/Users/andrewnagle/Claude/Wet Ink Organic Social Posts/content-pipeline-<YYYY-MM-DD>-VERIFY-FAIL.md` with:
 - target article (title, webflow_id, URL)
@@ -749,7 +814,7 @@ Tell the user / log to the scheduled-run report:
 - Article(s) processed in this run (title, category, URL — one section per iteration if the loop fired multiple times)
 - Phase 1.5 preflight outcome per article (built fresh / skipped-built / skipped-done)
 - Reviewer verdict: PASS (or skipped if Phase 1.5 routed us around it)
-- Canva edit URLs: 2 Reels (Uncensored + SFW) + 1 Carousel per article
+- Canva edit URLs: the Reel(s) the MODE flag calls for (currently 1 Uncensored) + 1 Carousel per article
 - Asana task URLs: 2 Reel tasks + 1 Carousel task per article
 - IG caption preview (first 100 chars)
 - Number of remaining eligible articles (post-May-10, `In Asana != Y`)
@@ -763,7 +828,7 @@ If this skill is invoked in an environment without subagent support (Claude Desk
 
 1. Run the `instagram-reels` skill inline. Capture design IDs and `uploaded_asset_id`.
 2. Run `social-post-optimizer` + `wet-ink-voice` inline to draft captions.
-3. **Skip the formal reviewer subagent.** Instead, after both designs are committed, run the reviewer's checks inline: open each design with `Canva:start-editing-transaction` (then `cancel-editing-transaction` to stay read-only), find each page's `editable: true` image fill, confirm its `asset_id` is in the article's `uploaded_asset_ids` list, and verify the template fingerprint (5 pages of 1080×1920 + decorative asset `MADWDzB46Dw` on every page). See `.claude/agents/reel-image-reviewer.md` for the full rules. If any scene fails, stop and report — do not create Asana tasks.
+3. **Skip the formal reviewer subagent.** Instead, after both designs are committed, run the reviewer's checks inline: open each design with `Canva:start-editing-transaction` (then `cancel-editing-transaction` to stay read-only), find each page's `editable: true` image fill, confirm its `asset_id` is in the article's `uploaded_asset_ids` list, and verify the template fingerprint (5 pages of 1080×1920 + decorative asset `MADWDzB46Dw` on every page). See `/Users/andrewnagle/Documents/wet-ink-ops/.claude/agents/reel-image-reviewer.md` for the full rules. If any scene fails, stop and report — do not create Asana tasks.
 4. Proceed to Phase 4 only if the manual check passes.
 
 The Desktop path is less reliable than the subagent gate because the same context that built the designs is checking them. Prefer running this skill through Claude Code / cloud routine when possible.

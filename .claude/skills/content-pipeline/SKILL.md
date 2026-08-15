@@ -271,14 +271,26 @@ Returns `{ok: true, count: N, rows: [{row, num, title, date, in_asana}, ...]}`. 
 
 ### Step 3: Compare
 
-An article from the site is "new" if its title does not appear in the sheet's Article Coverage `Article Title` column.
+Match in this order. An article is "new" only if **all three** checks miss.
 
-**Matching rules:**
-- Lowercase both sides
-- Strip leading/trailing whitespace
-- Strip trailing `?`, `!`, `.`, `,`
-- Normalize curly quotes (`’` → `'`, `“` → `"`)
-- If a site title is a close-but-not-exact match (likely a post edit in WordPress), flag for the user instead of treating as new
+**1. By `wp_id` (authoritative).** If the post's `wp_id` equals any row's `webflow_id`, the row exists — done. This is the durable key and it survives retitling, so always check it first.
+
+**2. By normalized title.** Lowercase, trim, strip trailing `?`/`!`/`.`/`,`, normalize curly quotes (`’`→`'`, `“`→`"`) and dashes (`—`/`–`→`-`), collapse whitespace.
+
+**3. By fuzzy title ≥ 0.85 — the title-drift guard. Do not skip this.**
+
+```python
+from difflib import SequenceMatcher
+score = SequenceMatcher(None, norm(wp_title), norm(row_title)).ratio()
+```
+
+If any row scores ≥ 0.85, treat the article as **already tracked** and report it as title drift for manual review — do **not** append a row.
+
+**Why:** pre-migration rows carry inert Webflow ids, so check 1 can't match them. When such an article is *also* retitled after publish, check 2 misses too, and a naive diff appends a duplicate. Live cases: tracker "The First **Adult** Star: Linda Lovelace" vs WP "The First **Porn** Star"; "Nikki **Night**" vs "Nikki **Knight**"; "Hot and Smart" vs "Silicon Valley's Smartest Escorts…". The 0.85 threshold is measured, not guessed — genuine drift scores 0.87–0.99, genuinely distinct articles 0.44–0.73.
+
+**⚠️ Residual gap — a *total* retitle still slips through.** Fuzzy matching only catches partial drift. Live case: tracker row 120 "Hot and Smart: The Only Skill Set That's Actually Recession-Proof" is the same article as WP "Silicon Valley's Smartest Escorts Are Charging $6,000 an Hour…" — they score 0.31, so all three checks miss and Phase 1 would append a duplicate. There is no automatic fix; when the report flags a title mismatch, resolve it by hand before the next run.
+
+**⚠️ Do NOT "fix" a pre-migration row by backfilling its WP id into column L.** It looks like the obvious repair and it silently breaks the row. Column L and the Asana `ArticleID` must always hold the *same* value. Pre-migration rows hold an inert Webflow id in **both** places, which is internally consistent. Overwrite column L alone and Phase 0.5 will search Asana for the WP id, find nothing, conclude the row is unbuilt, and re-create every task as a duplicate. If you ever do re-key such a row, update the Asana custom field on all of its tasks in the same pass.
 
 ### Step 4: Append new rows via the webhook
 

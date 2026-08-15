@@ -104,8 +104,30 @@ DUAL_VERSION the 3-task wording applies as written.
 Before EVERY `create_tasks` call, do this 3-step pre-check:
 
 1. Search Asana: `search_tasks` with `projects.any: "1214264767251100"` and `custom_fields: '{"1215162242710046.contains":"<webflow_id>"}'`. Get back the list of existing tasks for this article.
-2. Build `existing_names = {task.name for task in results}`. Compute `planned_names` (your intended task names). Compute `tasks_to_create = planned_names - existing_names`.
-3. If `tasks_to_create` is empty → skip the entire `create_tasks` call. If non-empty → call `create_tasks` ONLY with the tasks in `tasks_to_create`, never with the full planned set.
+2. Build `existing_names = {norm_name(task.name) for task in results}`. Compute your intended task names and build `planned = {norm_name(n): n for n in planned_names}` — normalized key, **raw** name as value. Compute `tasks_to_create = [planned[k] for k in planned if k not in existing_names]`.
+3. If `tasks_to_create` is empty → skip the entire `create_tasks` call. If non-empty → call `create_tasks` ONLY with the tasks in `tasks_to_create`, never with the full planned set. Create them under their **raw** names — normalization is for comparison only, never for the name you write.
+
+<a id="norm-name"></a>
+**`norm_name()` — the canonical task-name normalization. Never compare raw task names.**
+
+Identical to `normalizeTitle` in `api/webhook.js`, applied to the whole task name (title + ` — <suffix>`):
+
+```python
+import re
+
+def norm_name(s):
+    s = str(s).lower().strip()
+    s = re.sub(r"[‘’]", "'", s)      # curly single → straight
+    s = re.sub(r"[“”]", '"', s)      # curly double → straight
+    s = re.sub(r"[—–]", "-", s)      # em/en dash → hyphen
+    s = re.sub(r"[?!.,]+$", "", s)             # strip trailing punctuation
+    s = re.sub(r"\s+", " ", s)                 # collapse whitespace
+    return s
+```
+
+Both sides of every comparison go through it — the Asana name AND the planned name. This applies everywhere task names are compared: Phase 0.5 Step 5a/5b, Phase 1.5 Step 5.5c fallback, and Phase 4 Step 10a.
+
+**Why:** WordPress titles carry curly apostrophes (`’`) that round-trip as straight ones (`'`) through Sheets, Canva, and Asana. A raw set subtraction then misses by exactly one character and the pipeline creates a duplicate. Confirmed live 2026-08-15 — three articles (BDSM Academy, Free Speech Coalition, Hot and Smart) each carried a pair of Carousel tasks differing **only** by apostrophe style. The tracker's title matching already normalizes; the Asana name comparison did not.
 
 There are no exceptions. If the SKILL says "create the Reel + SFW + Carousel tasks" but the SFW task already exists, you only create Reel + Carousel. This rule overrides any per-phase wording elsewhere in the SKILL.
 
@@ -356,13 +378,13 @@ For each in-scope row:
    - `<title> — Long SFW Reel`
    - `<title> — Instagram Carousel`
 
-   Build `existing_names = set of returned task names`. Build `expected_names = set of canonical names based on row.carousel` (3 names if K=Y, 2 names if K=N — the first two only, never retroactively add carousel for K=N rows). Then `missing_names = expected_names - existing_names`. **Only create tasks whose names are in `missing_names`.** Never create a task whose name (or normalized variant) is already in `existing_names`.
+   Build `existing_names = {norm_name(t) for t in returned task names}` — **normalized, per the [`norm_name()` rule](#norm-name) at the top of this skill. Never compare raw names; curly-vs-straight apostrophes will slip a duplicate through.** Build the canonical expected names based on `row.carousel` (3 names if K=Y, 2 names if K=N — the first two only, never retroactively add carousel for K=N rows) and key them the same way: `expected = {norm_name(n): n for n in expected_names}`. Then `missing = [expected[k] for k in expected if k not in existing_names]`. **Only create tasks in `missing`, and create them under their raw names.** Never create a task whose normalized name is already in `existing_names`.
 
-   **5b. Idempotency double-check.** Right before each `create_tasks` call, re-search Asana for the exact task name you're about to create (use `search_tasks_preview` with `text="<exact task name>"` AND the ArticleID custom field filter). If even one match comes back, SKIP that create — it already exists. This guards against race conditions and your own state drift.
+   **5b. Idempotency double-check.** Right before each `create_tasks` call, re-search Asana for the exact task name you're about to create (use `search_tasks_preview` with `text="<exact task name>"` AND the ArticleID custom field filter). Compare the returned names to the planned one **through `norm_name()`**, not raw — Asana's `text` search is a substring match and may return a curly/straight variant that a raw `==` would reject. If even one normalized match comes back, SKIP that create — it already exists. This guards against race conditions and your own state drift.
 
    **5c. Carousel rule — strict.** If `row.carousel == "N"`, do NOT create a Carousel task in Phase 0.5 even if "every article gets a carousel" is the new default. Phase 0.5 only fills GAPS in what the row historically should have; it does not retroactively add new task types. Cycle-era K=N rows stay at 2 tasks forever unless the user explicitly asks for a carousel build.
 
-   **5d. Execute creates.** Look up the article's existing Canva designs by searching the Wet Ink Reels folder (`FAHHtY3V36U`) and the carousel folder (see `instagram-carousel` SKILL.md for its folder id) for design titles starting with the article title. Spawn the **caption subagent** (Phase 2 Step 7 caption prompt) to regenerate captions from the article URL. For each name in `missing_names`, call `Asana:create_tasks` with the Phase 4 Step 10 parameters AND `custom_fields: '{"1215162242710046":"<row.webflow_id>"}'`.
+   **5d. Execute creates.** Look up the article's existing Canva designs by searching the Wet Ink Reels folder (`FAHHtY3V36U`) and the carousel folder (see `instagram-carousel` SKILL.md for its folder id) for design titles starting with the article title. Spawn the **caption subagent** (Phase 2 Step 7 caption prompt) to regenerate captions from the article URL. For each raw name in `missing` (from 5a), call `Asana:create_tasks` with the Phase 4 Step 10 parameters AND `custom_fields: '{"1215162242710046":"<row.webflow_id>"}'`.
 
    **5e. Verify.** Re-search by ArticleID. If new count != expected count, save a FAIL note. **Do not retry creates** — log and move on. Manual cleanup required.
 6. If actual count > expected → log as "over-built; manual review" and skip. (Likely a duplicate from a previous ad-hoc run; don't auto-delete.)
@@ -450,12 +472,7 @@ mcp__asana__search_tasks_preview:
   text: "<article title>"
 ```
 
-Match logic for the fallback: a task is a hit if its name, after the same normalization the webhook uses, contains the article title. Normalization:
-- lowercase, trim
-- `‘’` → `'`, `“”` → `"`
-- `—–` → `-`
-- strip trailing `?!.,`
-- collapse whitespace
+Match logic for the fallback: a task is a hit if `norm_name(task.name)` contains `norm_name(article_title)` — the [`norm_name()` rule](#norm-name) at the top of this skill, which is the same normalization the webhook applies to titles (lowercase + trim, `‘’`→`'`, `“”`→`"`, `—–`→`-`, strip trailing `?!.,`, collapse whitespace). **Both sides must be normalized** — comparing a normalized task name against a raw title reintroduces the curly-apostrophe miss this normalization exists to prevent.
 
 The Wet Ink Reels pattern is two tasks per article: `<Article Title> — Long Uncensored Reel` and `<Article Title> — Long SFW Reel`. Either matching counts as "Asana has it" in the fallback path.
 
@@ -707,9 +724,11 @@ mcp__asana__search_tasks
   fields: ["gid", "name"]
 ```
 
-Build `existing_names = set of returned task names`. Compute `planned_names = {"<title> — Long Uncensored Reel", "<title> — Long SFW Reel", "<title> — Instagram Carousel"}`. Compute `tasks_to_create = planned_names - existing_names`. **Only pass tasks in `tasks_to_create` to `create_tasks`.** Skip the entire `create_tasks` call if `tasks_to_create` is empty.
+**Compare normalized, create raw.** Build `existing_names = {norm_name(t) for t in returned task names}` using the [`norm_name()` rule](#norm-name) at the top of this skill. Compute `planned_names = {"<title> — Long Uncensored Reel", "<title> — Long SFW Reel", "<title> — Instagram Carousel"}` and key them the same way: `planned = {norm_name(n): n for n in planned_names}`. Then `tasks_to_create = [planned[k] for k in planned if k not in existing_names]`. **Only pass tasks in `tasks_to_create` to `create_tasks`, under their raw names.** Skip the entire `create_tasks` call if `tasks_to_create` is empty.
 
-This pre-check catches: (a) Phase 1.5 routed to "partial-built" path so some tasks exist; (b) a previous run crashed mid-Step-10; (c) any retry scenario. Never create a duplicate.
+**Never subtract raw names here.** The article title flows into the task name, and its apostrophe may be curly (`’`) on one side and straight (`'`) on the other — a raw set subtraction misses and Asana gets a second copy of a task it already has. This is the exact bug that produced duplicate Carousel tasks on three articles (2026-08-15).
+
+This pre-check catches: (a) Phase 1.5 routed to "partial-built" path so some tasks exist; (b) a previous run crashed mid-Step-10; (c) any retry scenario; (d) curly-vs-straight apostrophe drift between the planned name and the existing one. Never create a duplicate.
 
 **Step 10b — Create:**
 - **Reel task(s)** — per the `instagram-reels` MODE flag: **one Uncensored task** under `UNCENSORED_ONLY` (current), or Uncensored + SFW under `DUAL_VERSION`. Per the existing template below.
@@ -875,7 +894,7 @@ All Canva template/folder/brand-kit IDs and all Asana project/section/assignee/c
 
 **Multiple unprocessed articles** (newly-detected + backlog from prior runs): Phase 2-4 processes exactly one per run — the most recent unprocessed article, per Phase 1.5 Step 5.5's selection rule. Older unprocessed articles get picked up by subsequent runs (which fire twice daily). Tell the user how many backlog candidates remain after this run.
 
-**Curly-quote drift:** WordPress `title.rendered` returns HTML-entity-encoded straight quotes (unescape them) but Google Sheets sometimes auto-corrects to curly (`’`). Always normalize quote characters before comparing titles.
+**Curly-quote drift:** WordPress `title.rendered` returns HTML-entity-encoded straight quotes (unescape them) but Google Sheets sometimes auto-corrects to curly (`’`). Always normalize quote characters before comparing titles — **and before comparing Asana task names**, which carry the title verbatim. Run both sides through [`norm_name()`](#norm-name). Raw name comparison in the idempotency pre-check is what produced duplicate Carousel tasks on three articles (BDSM Academy, Free Speech Coalition, Hot and Smart) before 2026-08-15: the planned name had `’`, the existing task had `'`, the set subtraction missed, and the pipeline created a second copy.
 
 **Reviewer FAIL on one design but not the other:** Treat as overall FAIL. Don't half-commit. Save the report and stop.
 
